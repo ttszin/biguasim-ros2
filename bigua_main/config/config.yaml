@@ -1,0 +1,76 @@
+/**:
+  ros_parameters:
+    holoocean_scenario:
+      name: hovering_dynamics
+      package_name: Ocean   
+      world: SimpleUnderwater
+      main_agent: uav0     
+      ticks_per_sec: 30
+      frames_per_sec: 180
+      draw_arrow: true
+      show_viewport: true
+      agents:
+        - agent_name: uav0
+          agent_type: UavAgent
+          control_scheme: 2  
+          location: [0, 0, 20]
+          rotation: [0, 10, 90]
+          publish_commands: false
+          sensors:
+            - sensor_type: DynamicsSensor
+              configuration:
+                UseCOM: true
+                UseRPY: false
+              ros_publish: true
+            - sensor_type: IMUSensor
+              ros_publish: true
+              tick_every: 3
+              configuration:
+                AccelCov: [0.001, 0.001, 0.001]
+                AngVelCov: [0.001, 0.001, 0.001]
+            - sensor_type: GPSSensor
+              ros_publish: true
+              tick_every: 30
+              configuration:
+                Cov: [0.0001, 0.0001, 0.0001]
+                Depth: 1.5
+                DepthCov: 0.05
+            - sensor_type: LocationSensor
+              ros_publish: true
+            - sensor_type: RotationSensor
+              ros_publish: true
+            - sensor_type: VelocitySensor
+              ros_publish: true
+        - agent_name: rov0
+          agent_type: SurfaceVessel
+          control_scheme: 2  
+          location: [0, 0, 0]
+          rotation: [0, 10, 90]
+          publish_commands: false
+          sensors:
+            - sensor_type: DynamicsSensor
+              configuration:
+                UseCOM: true
+                UseRPY: false
+              ros_publish: true
+            - sensor_type: IMUSensor
+              ros_publish: true
+              tick_every: 3
+              configuration:
+                AccelCov: [0.001, 0.001, 0.001]
+                AngVelCov: [0.001, 0.001, 0.001]
+            - sensor_type: GPSSensor
+              ros_publish: true
+              tick_every: 30
+              configuration:
+                Cov: [0.0001, 0.0001, 0.0001]
+                Depth: 1.5
+                DepthCov: 0.05
+            - sensor_type: LocationSensor
+              ros_publish: true
+            - sensor_type: RotationSensor
+              ros_publish: true
+            - sensor_type: VelocitySensor
+              ros_publish: true
+          
+          
