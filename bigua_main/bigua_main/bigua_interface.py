@@ -29,7 +29,9 @@ class BiguaInterface():
         
         #TODO: make sure dynamics sensor is enabled 
         if init:
+            print('criando')
             self.env = holoocean.make(scenario_cfg=scenario)
+            print('criado')
             # self.scenario = scenario
             self.scenario = self.env._scenario
             self.initialized = True
@@ -206,7 +208,7 @@ class BiguaInterface():
         return time_warp
 
     def get_time_warp_period(self):
-        return self.get_period() / self.get_time_warp()
+        return self.get_period() / self.get_time_warp() 
 
 
 

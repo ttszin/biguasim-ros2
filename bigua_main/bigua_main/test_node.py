@@ -37,7 +37,7 @@ class TestNode(Node):
             _ = self.create_subscription(
                 Float64MultiArray,
                 topic_base,
-                self.test_callback,
+                lambda msg, agent_name=agent_cfg['agent_name'] : self.control_base_callback(msg, agent_name),
                 10
             )
 
@@ -55,11 +55,11 @@ class TestNode(Node):
         self.timer = self.create_timer(new_period, self.tick_callback)
 
     def control_base_callback(self, msg, agent_name):
+        print(agent_name, msg.data)
         self.interface.send_control_command(agent_name, msg.data)
 
     def tick_callback(self):
         #Tick the envionment and publish data as many times as requested
-        
         state = self.interface.tick()
         # self.get_logger().warn(f'state: {state}')
         self.interface.publish_sensor_data(state)
