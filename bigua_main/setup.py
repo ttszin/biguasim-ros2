@@ -26,13 +26,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'bigua_node = bigua_main.bigua_node:main',
-            'test_node = bigua_main.test_node:main',
-            # 'torpedo_node = holoocean_main.torpedo_node:main',
-            # 'state_estimate = holoocean_main.RK45_state_est:main',
-            # 'command_node = holoocean_main.command_node:main',
-            # 'fins_node = holoocean_main.fins_node:main',
-            # 'controller_node = holoocean_main.controller_node:main'
+            'bigua_node = bigua_main.bigua_node:main'
         ],
     },
 )

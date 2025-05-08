@@ -2,7 +2,7 @@
   ros_parameters:
     holoocean_scenario:
       name: hovering_dynamics
-      package_name: Teste
+      package_name: Tank
       world: 64-tank-Map-1
       main_agent: auv0     
       ticks_per_sec: 30

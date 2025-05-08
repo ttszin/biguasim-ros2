@@ -2,25 +2,20 @@ from bigua_main.bigua_interface import BiguaInterface, np
 
 import rclpy
 from rclpy.node import Node
-
-from bigua_interfaces.msg import HSD
-from std_msgs.msg import Header
-
+from std_msgs.msg import Float64MultiArray
 
 class BiguaNode(Node):
-    
     def __init__(self):
         super().__init__('bigua_node')
-        
         self.declare_parameter('params_file', '')
         
         file_path = self.get_parameter('params_file').get_parameter_value().string_value
 
+        self.subscribers = dict()
+
         self.interface = BiguaInterface(file_path, node=self)
-        
-        #Create list of sensor publishers that have ros_publish=True based on scenario:
-        self.sensors = []
         self.sensor_publisher_create()
+        self.control_subscribers_create()
         
         #TODO: Make sure it doesnt tick to fast
         #Tick Timer
@@ -29,35 +24,48 @@ class BiguaNode(Node):
         self.timer = self.create_timer(period, self.tick_callback)
         self.callback_in_progress = False
         self.get_logger().info('Tick Started')
-        
 
-    def create_publishers(self):
-        for sensor in self.sensors:
-            sensor.publisher = self.create_publisher(sensor.message_type, sensor.name, 10)
+ 
+    def control_subscribers_create(self):
+        """
+        Define a subscriber for each agent, based on his name, to receive control commands.
+        """
+        scenario = self.interface.scenario
+
+        for agent_cfg in scenario['agents']:
+
+            topic_base = f"{agent_cfg['agent_name']}/command_control/base"
+            _ = self.create_subscription(
+                Float64MultiArray,
+                topic_base,
+                lambda msg, agent_name=agent_cfg['agent_name'] : self.control_base_callback(msg, agent_name),
+                10
+            )
 
     def sensor_publisher_create(self):
-        self.sensors = self.interface.create_sensor_list()
-        self.create_publishers()            
-    
-    def publish_sensor_data(self, state):
-        self.interface.publish_sensor_data(state)
-            
+        """
+        Define a publisher for each agent sensor, based on his name and sensor name, to receive 
+        control commands.
+        """
+        for sensor in self.interface.sensors:
+            sensor.publisher = self.create_publisher(sensor.message_type, f"{sensor.agent_name}/{sensor.name}", 10) 
+        
+  
     def adjust_timer(self, new_period):
         self.get_logger().info(f'Adjusting timer period to {new_period} seconds')
         self.timer.cancel()
         self.timer = self.create_timer(new_period, self.tick_callback)
-    
+
+    def control_base_callback(self, msg, agent_name):
+        """
+        Send a message to the specified agent.
+        """
+        self.interface.send_control_command(agent_name, msg.data)
 
     def tick_callback(self):
-        #Tick the envionment and publish data as many times as requested
-        
-        #PASS IN A COMMAND TO THE TICK
-        command = np.array(np.zeros(6),float)
-
-        state = self.interface.tick(command)
-        self.publish_sensor_data(state)
+        state = self.interface.tick()
+        self.interface.publish_sensor_data(state)
     
-        
 
 def main(args=None):
     rclpy.init(args=args)
