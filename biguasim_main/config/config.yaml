@@ -1,0 +1,56 @@
+/**:
+  ros_parameters:
+    biguasim_scenario:
+      package_name: SkyDive
+      world: Pier-Harbor
+      main_agent: auv0     
+      ticks_per_sec: 30
+      frames_per_sec: 180
+      octree_min: 0.1
+      octree_max: 5
+      draw_arrow: true
+      show_viewport: true
+      agents:
+        - agent_name: auv0
+          agent_type: BlueROV2
+          publish_commands: false
+          sensors:
+            - sensor_type: DynamicsSensor
+              ros_publish: true
+              configuration:
+                UseCOM: true
+                UseRPY: false
+            - sensor_type: LocationSensor
+              ros_publish: true
+            - sensor_type: RotationSensor
+              ros_publish: true
+            - sensor_type: VelocitySensor
+              ros_publish: true
+          dynamics:
+            batch_size : 5
+          control_abstraction : 'cmd_motor_speeds'
+          location: [10, -301, -1]
+          rotation: [0, 0, 0]
+        - agent_name: auv1
+          agent_type: BlueROV2
+          publish_commands: false
+          sensors:
+            - sensor_type: DynamicsSensor
+              ros_publish: true
+              configuration:
+                UseCOM: true
+                UseRPY: false
+            - sensor_type: LocationSensor
+              ros_publish: true
+            - sensor_type: RotationSensor
+              ros_publish: true
+            - sensor_type: VelocitySensor
+              ros_publish: true
+          dynamics:
+            batch_size : 1
+          control_abstraction : 'cmd_motor_speeds'
+          location: [10, -303, -1]
+          rotation: [0, 0, 0]
+
+          
+          

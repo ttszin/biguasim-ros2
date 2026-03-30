@@ -1,19 +1,20 @@
-from bigua_main.bigua_interface import BiguaInterface, np
+
+from biguasim_main.interface import BiguaSimInterface
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray
 
-class BiguaNode(Node):
+class BiguaSimNode(Node):
     def __init__(self):
-        super().__init__('bigua_node')
+        super().__init__('biguasim_node')
         self.declare_parameter('params_file', '')
         
         file_path = self.get_parameter('params_file').get_parameter_value().string_value
 
         self.subscribers = dict()
 
-        self.interface = BiguaInterface(file_path, node=self)
+        self.interface = BiguaSimInterface(file_path, node=self)
         self.sensor_publisher_create()
         self.control_subscribers_create()
         
@@ -33,12 +34,12 @@ class BiguaNode(Node):
         scenario = self.interface.scenario
 
         for agent_cfg in scenario['agents']:
-
-            topic_base = f"{agent_cfg['agent_name']}/command_control/base"
+            agent_cfg_name = agent_cfg['agent_name'].replace('-', '_')
+            topic_base = f"{agent_cfg_name}/command_control"
             _ = self.create_subscription(
                 Float64MultiArray,
                 topic_base,
-                lambda msg, agent_name=agent_cfg['agent_name'] : self.control_base_callback(msg, agent_name),
+                lambda msg, agent_name=agent_cfg_name : self.control_callback(msg, agent_name),
                 10
             )
 
@@ -56,11 +57,11 @@ class BiguaNode(Node):
         self.timer.cancel()
         self.timer = self.create_timer(new_period, self.tick_callback)
 
-    def control_base_callback(self, msg, agent_name):
+    def control_callback(self, msg, agent_name):
         """
         Send a message to the specified agent.
         """
-        self.interface.send_control_command(agent_name, msg.data)
+        self.interface.send_control_command(agent_name, list(msg.data))
 
     def tick_callback(self):
         state = self.interface.tick()
@@ -69,7 +70,7 @@ class BiguaNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = BiguaNode()
+    node = BiguaSimNode()
     
     rclpy.spin(node)
 

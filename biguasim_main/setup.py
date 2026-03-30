@@ -2,11 +2,11 @@ from setuptools import find_packages, setup
 import os
 from glob import glob
 
-package_name = 'bigua_main'
+package_name = 'biguasim_main'
 
 setup(
     name=package_name,
-    version='0.0.0',
+    version='1.0.0',
     packages=find_packages(exclude=['test']),
     data_files=[
         ('share/ament_index/resource_index/packages',
@@ -26,7 +26,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'bigua_node = bigua_main.bigua_node:main'
+            'biguasim_node = biguasim_main.biguasim_node:main'
         ],
     },
 )

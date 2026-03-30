@@ -1,5 +1,5 @@
-## Holocean launch file 
-# Author: Braden Meyers
+## BiguaSim launch file 
+# Author: Matheus G. Mateus
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
@@ -9,31 +9,31 @@ from ament_index_python.packages import get_package_share_directory
 from pathlib import Path
 
 def generate_launch_description():
-    print('Launching Bigua-Sim Vehicle Simulation')
+    print('Launching BiguaSim Vehicle Simulation')
 
-    base = Path(get_package_share_directory('bigua_main'))
+    base = Path(get_package_share_directory('biguasim_main'))
     params_file = base / 'config' / 'config.yaml'
 
     # List contents of the directory to debug
     
-    bigua_namespace = 'bigua'
+    biguasim_namespace = 'biguasim'
 
-    bigua_main_node = launch_ros.actions.Node(
-        name='bigua_node',
-        package='bigua_main',
-        executable='bigua_node',  
-        namespace=bigua_namespace,
+    biguasim_main_node = launch_ros.actions.Node(
+        name='biguasim_node',
+        package='biguasim_main',
+        executable='biguasim_node',  
+        namespace=biguasim_namespace,
         output='screen',
         emulate_tty=True,
         parameters=[{'params_file': str(params_file)}],  # Pass parameters in the correct format
         remappings=[
-                ('/bigua/ControlCommand', '/control_command'),
+                ('/biguasim/ControlCommand', '/control_command'),
             ]    
         )
 
 
     return LaunchDescription([
-        bigua_main_node
+        biguasim_main_node
             # rosbag                            
     ])
 

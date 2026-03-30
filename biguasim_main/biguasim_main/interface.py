@@ -1,22 +1,40 @@
-import numpy as np
-import holoocean
-
-from pathlib import Path
+import biguasim
 import json
 import yaml
-from bigua_main.sensor_data_encode import encoders, multi_publisher_sensors
+
+import numpy as np
+
+from pathlib import Path
+
+from biguasim_main.sensor_data_encode import encoders, multi_publisher_sensors
 
 #TODO: Maybe add sensor data encode to this file
 
-class BiguaInterface():
+COMMAND_MAP = {
+    'accel' : 6,
+    'cmd_vel' : 3,
+    'cmd_vel_yaw' : 4,
+    'cmd_pos_yaw' : 4,
+    'cmd_rudders_sterns_motor_speed' : 5,
+    'cmd_depth_heading_rpm_surge' : 4
+}
+
+MOTOR_SPEEDS = {
+    "BlueBoat": 2,
+    "BlueROV2": 6,
+    "BlueROVHeavy" : 8,
+    "DjiMatrice" : 4
+}
+
+class BiguaSimInterface():
     '''
-    Class for abstracting holoocean python interface
+    Class for abstracting biguasim python interface
     Lists sensors and formats sensor data
     '''
 
     def __init__(self, scenario_path, init=True, node=None):
         """
-        Initialize holoocean enviornment with a path to a json file for the scenario
+        Initialize biguasim enviornment with a path to a json file for the scenario
         Create the vehicle object and the dynamics object
         """
         self.node = node
@@ -27,12 +45,14 @@ class BiguaInterface():
         #TODO: Make a parameter to use the system time
         self.system_time = True
         
+        self.r2b = str.maketrans('_', '-')
+        self.b2r = str.maketrans('-', '_')
+
+        self.command = dict()
+
         #TODO: make sure dynamics sensor is enabled 
         if init:
-            print('criando')
-            self.env = holoocean.make(scenario_cfg=scenario)
-            print('criado')
-            # self.scenario = scenario
+            self.env = biguasim.make(scenario_cfg=scenario)
             self.scenario = self.env._scenario
             self.initialized = True
             self.sensors = self.create_sensor_list()
@@ -40,6 +60,17 @@ class BiguaInterface():
             self.scenario = scenario
             self.initialized = False
 
+    def _get_agent_id(self, agent_name : str):
+        split = agent_name.find('_')
+        name = agent_name[:split]
+        idx = int(agent_name[split+3:])
+        return name, idx
+
+    def _get_command_shape(self, agent_name, agent_type):
+        control_abstraction = self.env._dynamics_dict[agent_name].control_abstraction
+        if control_abstraction == 'cmd_motor_speeds':
+            return MOTOR_SPEEDS[agent_type]
+        return COMMAND_MAP[control_abstraction]
 
 
     def parse_scenario(self, path):
@@ -50,20 +81,21 @@ class BiguaInterface():
             scenario = json.load(params_file)
 
         return scenario
+
     
-    def find_holoocean_scenario(self, yaml_content):
-        """Recursively search for 'holoocean_scenario' in the YAML content."""
+    def find_biguasim_scenario(self, yaml_content):
+        """Recursively search for 'biguasim_scenario' in the YAML content."""
         if isinstance(yaml_content, dict):
             for key, value in yaml_content.items():
-                if key == "holoocean_scenario":
+                if key == "biguasim_scenario":
                     return value
                 else:
-                    result = self.find_holoocean_scenario(value)
+                    result = self.find_biguasim_scenario(value)
                     if result is not None:
                         return result
         elif isinstance(yaml_content, list):
             for item in yaml_content:
-                result = self.find_holoocean_scenario(item)
+                result = self.find_biguasim_scenario(item)
                 if result is not None:
                     return result
         return None
@@ -72,16 +104,12 @@ class BiguaInterface():
         with open(scenario_path, 'r') as file:
             yaml_content = yaml.safe_load(file)
         
-        holoocean_scenario_yaml = self.find_holoocean_scenario(yaml_content)
+        biguasim_scenario_yaml = self.find_biguasim_scenario(yaml_content)
         
-        if holoocean_scenario_yaml is None:
-            raise KeyError("Could not find 'holoocean_scenario' in the YAML file.")
-        
-        # # Convert the 'holoocean_scenario' part to JSON
-        # scenario = json.dumps(holoocean_scenario_yaml, indent=4)
-        # print(holoocean_scenario_yaml)
+        if biguasim_scenario_yaml is None:
+            raise KeyError("Could not find 'biguasim_scenario' in the YAML file.")
 
-        return holoocean_scenario_yaml
+        return biguasim_scenario_yaml
 
     def create_sensor_list(self):
         scenario = self.scenario
@@ -90,19 +118,30 @@ class BiguaInterface():
             self.multi_agent_scenario = True
             print("Give sensors unique names that are reported on multiple agents")
         else:
-            self.multi_agent_scenario = False
+            self.multi_agent_scenario = False            
 
         sensors = []
 
         for agent in scenario["agents"]:
             #For each agent the control surface commands can be published 
             #TODO: Handle Multi agent scenario here
+            agent_name = agent['agent_name'].translate(self.b2r)
+            dynamics_name, _ = self._get_agent_id(agent_name)
+            if not dynamics_name in self.command:
+                batch_size = self.env._dynamics_dict[dynamics_name].batch_size
+                cmd_shape = self._get_command_shape(dynamics_name, agent['agent_type'])
+
+                if batch_size >1 :
+                    self.command[dynamics_name] = np.zeros((batch_size, cmd_shape)).tolist()
+                else:
+                    self.command[dynamics_name] = np.zeros(cmd_shape).tolist()
+            
             if "publish_commands" in agent and agent["publish_commands"]==True:
                 encoder_class = encoders.get("ControlCommand")
                 config = {}
                 config['sensor_name'] = "ControlCommand"
                 config['sensor_type'] = "ControlCommand"
-                config['agent_name'] = agent['agent_name']
+                config['agent_name'] = agent_name
                 config['state_name'] = 'ControlCommand'
                 sensors.append(encoder_class(config))
 
@@ -113,35 +152,30 @@ class BiguaInterface():
                     if sensor_type in multi_publisher_sensors:
                         for suffix in multi_publisher_sensors[sensor_type]:
                             full_type = f"{sensor['sensor_type']}{suffix}"
-                            full_name = f"{sensor['sensor_name']}{suffix}"
+                            sensor_name = sensor['sensor_name'] if 'sensor_name' in sensor else sensor['sensor_type']
+                            full_name = f"{sensor_name}/{suffix}"
                             
                             encoder_class = encoders.get(full_type)
                             sensor_copy = sensor.copy()  # Create a copy of the sensor dictionary
                             sensor_copy['sensor_name'] = full_name
-                            sensor_copy['agent_name'] = agent['agent_name']
-                            sensor_copy['state_name'] = sensor['sensor_name']  # Need the name to pull the data out of the state
+                            sensor_copy['agent_name'] = agent_name
+                            sensor_copy['state_name'] = sensor_name
                             sensors.append(encoder_class(sensor_copy))
                     else:
                         sensor_copy = sensor.copy()  # Create a copy of the sensor dictionary
-                        sensor_copy['agent_name'] = agent['agent_name']
-                        sensor_copy['state_name'] = sensor['sensor_name']  # Need the name to pull the data out of the state
+                        sensor_copy['agent_name'] = agent_name
+                        sensor_copy['state_name'] = sensor['sensor_name'] if 'sensor_name' in sensor else sensor['sensor_type']
                         encoder = encoders[sensor['sensor_type']]
                         sensors.append(encoder(sensor_copy))
         
         return sensors
 
-    def publish_sensor_data(self, state):
-        
-
+    def publish_sensor_data(self, state : dict):
+        self._state = state.copy()
         for sensor in self.sensors:
-            # print(f'sensor: {sensor.publisher}')
             try:
-                if self.multi_agent_scenario:
-                    msg = sensor.encode(state[sensor.agent_name][sensor.state_name])
-
-                else:
-                    msg = sensor.encode(state[sensor.state_name])
-                    # print(msg)
+                agent_name, idx = sensor.agent_name.split('_id')
+                msg = sensor.encode(state[agent_name][int(idx)][sensor.state_name])
 
                 # Header
                 if self.system_time:
@@ -159,16 +193,29 @@ class BiguaInterface():
                 # Handle other exceptions
                 print(f"Error processing sensor: {sensor.name}, type: {sensor.type}, error: {str(e)}")
 
-    def send_control_command(self, agent_name:None, command:None):
-        self.env.act(agent_name, command)
+    def send_control_command(self, agent_name : str, command : list):
         
+        dynamics_name, idx = self._get_agent_id(agent_name)
+        
+        if all(isinstance(x, list) for x in self.command[dynamics_name]):
+            assert len(self.command[dynamics_name][idx]) == len(command)
+            self.command[dynamics_name][idx] = command  
+
+        else:
+            assert len(self.command[dynamics_name]) == len(command)
+            self.command[dynamics_name] = command      
 
     def tick(self):
         """
-        Step the holoocean enviornment and the vehicle dynamics 
+        Step the biguasim enviornment and the vehicle dynamics 
         Return the state
         """
-        state = self.env.tick()
+        cmd = self.command
+        if len(self.command) == 1:
+            cmd = self.command[next(iter(self.command))]
+
+        state = self.env.step(cmd)
+
         return state
     
     def get_scenario(self):
@@ -209,7 +256,7 @@ class BiguaInterface():
 
     def get_time_warp_period(self):
         return self.get_period() / self.get_time_warp() 
-
+    
 
 
 

@@ -1,4 +1,4 @@
-
+__pycache__/
 # Ignore ROS 2 workspace build artifacts
 build/
 install/

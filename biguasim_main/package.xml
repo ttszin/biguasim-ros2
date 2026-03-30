@@ -1,15 +1,15 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>bigua_main</name>
+  <name>biguasim_main</name>
   <version>0.0.0</version>
-  <description>Ros Interface for Bigua Hybrid Aerial-Underwater Simulator</description>
+  <description>Ros Interface for BiguaSim Hybrid Aerial-Underwater Simulator</description>
   <maintainer email="eng.mgmateus@gmail.com">mgmateus</maintainer> 
   <license>MIT</license>
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
-  <exec_depend>bigua_interfaces</exec_depend>
+  <exec_depend>biguasim_interfaces</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>

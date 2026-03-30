@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from sensor_msgs.msg import Imu
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Vector3Stamped, PoseWithCovarianceStamped, TwistWithCovarianceStamped
-from bigua_interfaces.msg import DVLSensorRange, UCommand
+from biguasim_interfaces.msg import DVLSensorRange, UCommand
 import numpy as np
 
 
