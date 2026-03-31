@@ -13,7 +13,8 @@ multi_publisher_sensors = {
     'DynamicsSensor': ['Odom', 'IMU'],
     'IMUSensor': ['', 'Bias'],
     'RGBCamera': ['', 'camera_info'],
-    'DepthCamera': ['', 'camera_info']
+    'DepthCamera': ['', 'camera_info'],
+    'AnnotationComponent' : ['', 'camera_info'],
 }
 
 class SensorPublisher(ABC):
@@ -542,6 +543,8 @@ encoders = {
     'RGBCamera' : ImageEncoder,
     'RGBCameracamera_info' : CameraInfoEncoder,
     'DepthCamera' : DepthMapEncoder,
-    'DepthCameracamera_info' : CameraInfoEncoder
+    'DepthCameracamera_info' : CameraInfoEncoder,
+    'AnnotationComponent' : ImageEncoder,
+    'AnnotationComponentcamera_info' : CameraInfoEncoder,
     # Add other sensor type encoders here...
 }
