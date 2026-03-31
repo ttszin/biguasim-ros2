@@ -3,6 +3,7 @@ from sensor_msgs.msg import Imu, MagneticField
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Vector3Stamped, PoseWithCovarianceStamped, TwistWithCovarianceStamped
 from biguasim_interfaces.msg import DVLSensorRange, UCommand
+from scipy.spatial.transform import Rotation
 import numpy as np
 
 
@@ -396,6 +397,33 @@ class MagneticFieldEncoder(SensorPublisher):
         msg.magnetic_field.y = float(sensor_data[1])
         msg.magnetic_field.z = float(sensor_data[2])
         return msg
+    
+class PoseSensorEncoder(SensorPublisher):
+    def __init__(self, sensor_dict):
+        super().__init__(sensor_dict)
+
+        self.message_type = PoseWithCovarianceStamped
+
+    def encode(self, sensor_data):
+        msg = self.message_type()
+        msg.header.frame_id = self.socket
+
+        # Rotation
+        rot_matrix = sensor_data[:3, :3]
+        quat = Rotation.from_matrix(rot_matrix).as_quat()
+
+        # Position
+        msg.pose.pose.position.x = float(sensor_data[0, 3])
+        msg.pose.pose.position.y = float(sensor_data[1, 3])
+        msg.pose.pose.position.z = float(sensor_data[2, 3])
+
+        # Orientation
+        msg.pose.pose.orientation.x = float(quat[0])
+        msg.pose.pose.orientation.y = float(quat[1])
+        msg.pose.pose.orientation.z = float(quat[2])
+        msg.pose.pose.orientation.w = float(quat[3])
+
+        return msg
         
 # Define other encoders similarly...
 
@@ -413,5 +441,6 @@ encoders = {
     'GPSSensor': GPSEncoder,
     'ControlCommand': CommandEncoder,
     'MagnetometerSensor': MagneticFieldEncoder,
+    'PoseSensor': PoseSensorEncoder
     # Add other sensor type encoders here...
 }
