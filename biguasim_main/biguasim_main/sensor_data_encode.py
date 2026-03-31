@@ -381,7 +381,22 @@ class CommandEncoder(SensorPublisher):
         msg.thruster = int(sensor_data[-1])
 
         return msg
-    
+
+class MagneticFieldEncoder(SensorPublisher):
+    def __init__(self, sensor_dict):
+        super().__init__(sensor_dict)
+
+        self.message_type = MagneticField
+
+    def encode(self, sensor_data):
+        msg = self.message_type()
+        msg.header.frame_id = self.socket
+        # Assign magnetic field values
+        msg.magnetic_field.x = float(sensor_data[0])
+        msg.magnetic_field.y = float(sensor_data[1])
+        msg.magnetic_field.z = float(sensor_data[2])
+        return msg
+        
 # Define other encoders similarly...
 
 
@@ -397,5 +412,6 @@ encoders = {
     'DynamicsSensorIMU': DynamicsIMUEncoder,
     'GPSSensor': GPSEncoder,
     'ControlCommand': CommandEncoder,
+    'MagnetometerSensor': MagneticFieldEncoder,
     # Add other sensor type encoders here...
 }
