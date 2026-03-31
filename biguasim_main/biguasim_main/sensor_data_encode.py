@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from sensor_msgs.msg import Imu, MagneticField, Image, CameraInfo
+from sensor_msgs.msg import Imu, MagneticField, Image, CameraInfo, LaserScan
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Vector3Stamped, PoseWithCovarianceStamped, TwistWithCovarianceStamped
 from biguasim_interfaces.msg import DVLSensorRange
@@ -523,6 +523,46 @@ class DepthMapEncoder(SensorPublisher):
             print(f"ERROR: Expected data size {expected_size}, but got {actual_size}")
 
         return msg
+    
+class LaserScanEncoder(SensorPublisher):
+    def __init__(self, sensor_dict):
+        super().__init__(sensor_dict)
+
+        self.message_type = LaserScan
+        
+        count = 1
+        range_max = 10.0
+
+        if self.config is not None:
+            if "LaserMaxDistance" in self.config:
+                range_max = float(self.config["LaserMaxDistance"])
+            if "LaserCount" in self.config:
+                count = int(self.config["LaserCount"])
+
+        self.msg_template = self.message_type()
+
+        self.msg_template.header.frame_id = self.socket
+        self.msg_template.angle_min = 0.0 # 0 degrees
+        self.msg_template.angle_max = 6.28319   # 360 degrees
+        self.msg_template.angle_increment = 6.28319 / count
+
+        self.msg_template.range_min = 0.0
+        self.msg_template.range_max = range_max
+
+
+    def encode(self, sensor_data):
+        msg = self.message_type()
+        # Copy template fields
+        msg.header.frame_id = self.msg_template.header.frame_id
+        msg.angle_min = self.msg_template.angle_min
+        msg.angle_max = self.msg_template.angle_max
+        msg.angle_increment = self.msg_template.angle_increment
+        msg.range_min = self.msg_template.range_min
+        msg.range_max = self.msg_template.range_max
+
+        msg.ranges = sensor_data.tolist()
+
+        return msg
         
 # Define other encoders similarly...
 
@@ -546,5 +586,6 @@ encoders = {
     'DepthCameracamera_info' : CameraInfoEncoder,
     'AnnotationComponent' : ImageEncoder,
     'AnnotationComponentcamera_info' : CameraInfoEncoder,
+    'RangeFinderSensor': LaserScanEncoder,
     # Add other sensor type encoders here...
 }
