@@ -1,14 +1,17 @@
 from abc import ABC, abstractmethod
-from sensor_msgs.msg import Imu
+from sensor_msgs.msg import Imu, MagneticField
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Vector3Stamped, PoseWithCovarianceStamped, TwistWithCovarianceStamped
 from biguasim_interfaces.msg import DVLSensorRange, UCommand
 import numpy as np
 
 
+# TODO make a not about how the Dynamics Sensor IMU is not in local frame
 multi_publisher_sensors = {
     'DVLSensor': ['Velocity', 'Range'],
-    'DynamicsSensor': ['Odom', 'IMU']
+    'DynamicsSensor': ['Odom', 'IMU'],
+    'IMUSensor': ['', 'Bias']
+    # TODO add Camera sensor and info topic
 }
 
 class SensorPublisher(ABC):
@@ -21,6 +24,12 @@ class SensorPublisher(ABC):
             self.config = sensor_dict['configuration']
         else:
             self.config = None
+
+        if "socket" in sensor_dict and sensor_dict['socket'] != "":
+            self.socket = sensor_dict['socket']
+        else:
+            self.socket = "base_link"
+
         self.publisher = None
 
 
@@ -66,7 +75,7 @@ class IMUEncoder(SensorPublisher):
     
     def encode(self, sensor_data):
         msg = self.message_type()
-        msg.header.frame_id = 'odom'
+        msg.header.frame_id = self.socket
         msg.orientation_covariance[0] = -1
 
         # Assign acceleration
@@ -113,7 +122,7 @@ class DVLEncoder(SensorPublisher):
 
     def encode(self, sensor_data):
         msg = self.message_type()
-        msg.header.frame_id = 'odom'
+        msg.header.frame_id = self.socket
         # Assign velocity
         msg.twist.twist.linear.x = float(sensor_data[0])
         msg.twist.twist.linear.y = float(sensor_data[1])
@@ -153,7 +162,7 @@ class DepthEncoder(SensorPublisher):
 
     def encode(self, sensor_data):
         msg = self.message_type()
-        msg.header.frame_id = 'map'
+        msg.header.frame_id = self.socket
         msg.pose.pose.position.z = float(sensor_data[0])
         msg.pose.covariance = self.cov
         return msg
@@ -182,7 +191,7 @@ class LocationEncoder(SensorPublisher):
 
     def encode(self, sensor_data):
         msg = self.message_type()
-        msg.header.frame_id = 'odom'
+        msg.header.frame_id = self.socket
         #Frame ID might be map
         msg.pose.pose.position.x = float(sensor_data[0])
         msg.pose.pose.position.y = float(sensor_data[1])
@@ -213,7 +222,7 @@ class VelocityEncoder(SensorPublisher):
 
     def encode(self, sensor_data):
         msg = self.message_type()
-        msg.header.frame_id = 'odom'
+        msg.header.frame_id = self.socket
         #Frame id might actually be base link for velocity
 
         # Assign velocity
@@ -232,7 +241,7 @@ class DynamicsEncoder(SensorPublisher):
 
     def encode(self, sensor_data):
         msg = self.message_type()
-        msg.header.frame_id = 'map'
+        msg.header.frame_id = self.socket
         msg.child_frame_id = 'odom'
         if len(sensor_data) == 18:
             sensor_data.append(-100) # Should error out if mistakenly trying to use it as a quaternion
@@ -294,7 +303,7 @@ class DynamicsIMUEncoder(SensorPublisher):
 
     def encode(self, sensor_data):
         msg = self.message_type()
-        msg.header.frame_id = 'base_link'
+        msg.header.frame_id = self.socket
 
         # Orientation Quaternion
         msg.orientation.x = float(sensor_data[15])
@@ -344,7 +353,7 @@ class GPSEncoder(SensorPublisher):
 
     def encode(self, sensor_data):
         msg = self.message_type()
-        msg.header.frame_id = 'map'
+        msg.header.frame_id = self.socket
         msg.pose.pose.position.x = float(sensor_data[0])
         msg.pose.pose.position.y = float(sensor_data[1])
         msg.pose.pose.position.z = float(sensor_data[2])
@@ -372,7 +381,7 @@ class CommandEncoder(SensorPublisher):
         msg.thruster = int(sensor_data[-1])
 
         return msg
-
+    
 # Define other encoders similarly...
 
 
