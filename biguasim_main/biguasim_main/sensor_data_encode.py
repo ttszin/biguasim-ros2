@@ -1,8 +1,8 @@
 from abc import ABC, abstractmethod
-from sensor_msgs.msg import Imu, MagneticField
+from sensor_msgs.msg import Imu, MagneticField, Image, CameraInfo
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Vector3Stamped, PoseWithCovarianceStamped, TwistWithCovarianceStamped
-from biguasim_interfaces.msg import DVLSensorRange, UCommand
+from biguasim_interfaces.msg import DVLSensorRange
 from scipy.spatial.transform import Rotation
 import numpy as np
 
@@ -11,8 +11,8 @@ import numpy as np
 multi_publisher_sensors = {
     'DVLSensor': ['Velocity', 'Range'],
     'DynamicsSensor': ['Odom', 'IMU'],
-    'IMUSensor': ['', 'Bias']
-    # TODO add Camera sensor and info topic
+    'IMUSensor': ['', 'Bias'],
+    'RGBCamera': ['', 'camera_info']
 }
 
 class SensorPublisher(ABC):
@@ -361,27 +361,6 @@ class GPSEncoder(SensorPublisher):
         msg.pose.covariance = self.cov
         return msg
 
-class CommandEncoder(SensorPublisher):
-    def __init__(self, sensor_dict):
-        super().__init__(sensor_dict)
-
-        self.message_type = UCommand
-        self.fin = [360.0] * 4
-
-
-    def encode(self, sensor_data):
-        msg = self.message_type()
-        msg.fin = self.fin
-
-        #Control commands should be in a list with fins first and thruster last value in list (max 4 fins)
-        fin_count = len(sensor_data) - 1
-
-        for i in range(fin_count):
-            msg.fin[i] = float(sensor_data[i])
-        
-        msg.thruster = int(sensor_data[-1])
-
-        return msg
 
 class MagneticFieldEncoder(SensorPublisher):
     def __init__(self, sensor_dict):
@@ -424,6 +403,94 @@ class PoseSensorEncoder(SensorPublisher):
         msg.pose.pose.orientation.w = float(quat[3])
 
         return msg
+    
+class ImageEncoder(SensorPublisher):
+    def __init__(self, sensor_dict):
+        super().__init__(sensor_dict)
+
+        self.message_type = Image
+    
+    def encode(self, sensor_data):
+        msg = self.message_type()
+        msg.header.frame_id = self.socket
+
+        # Remove the alpha channel (convert RGBA -> RGB)
+        num_channels = 3  
+        sensor_data = sensor_data[:, :, :num_channels]  # Keep only the first 3 channels
+
+        # Ensure correct height and width
+        msg.height = sensor_data.shape[0]  # Rows
+        msg.width = sensor_data.shape[1]   # Columns
+
+        # Step calculation
+        msg.step = msg.width * num_channels  
+        msg.encoding = "bgr8"
+        msg.is_bigendian = 0
+
+        # Convert to bytes
+        msg.data = sensor_data.tobytes()
+
+        # Debugging: Check expected vs actual size
+        expected_size = msg.height * msg.step
+        actual_size = len(msg.data)
+        if expected_size != actual_size:
+            print(f"ERROR: Expected data size {expected_size}, but got {actual_size}")
+
+        return msg
+    
+class CameraInfoEncoder(SensorPublisher):
+    def __init__(self, sensor_dict):
+        super().__init__(sensor_dict)
+
+        self.message_type = CameraInfo
+    
+    def encode(self, sensor_data):
+        msg = self.message_type()
+        msg.header.frame_id = self.socket
+
+        width = sensor_data.shape[1]
+        height = sensor_data.shape[0]
+        fov_deg = 90
+
+        # Convert FOV to radians
+        fov_rad = np.deg2rad(fov_deg)
+
+        # Assume horizontal FOV
+        fx = width / (2.0 * np.tan(fov_rad / 2.0))
+        fy = fx  # square pixels assumption
+
+        cx = width / 2.0
+        cy = height / 2.0
+
+        msg.width = width
+        msg.height = height
+        msg.distortion_model = "plumb_bob"
+
+        # Intrinsic matrix K (row-major)
+        msg.k = [
+            fx, 0.0, cx,
+            0.0, fy, cy,
+            0.0, 0.0, 1.0
+        ]
+
+        # Rectification (identity)
+        msg.r = [
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0
+        ]
+
+        # Projection matrix P
+        msg.p = [
+            fx, 0.0, cx, 0.0,
+            0.0, fy, cy, 0.0,
+            0.0, 0.0, 1.0, 0.0
+        ]
+
+        # No distortion (ideal simulator camera)
+        msg.d = [0.0, 0.0, 0.0, 0.0, 0.0]
+
+        return msg
         
 # Define other encoders similarly...
 
@@ -439,8 +506,9 @@ encoders = {
     'DynamicsSensorOdom': DynamicsEncoder,
     'DynamicsSensorIMU': DynamicsIMUEncoder,
     'GPSSensor': GPSEncoder,
-    'ControlCommand': CommandEncoder,
     'MagnetometerSensor': MagneticFieldEncoder,
-    'PoseSensor': PoseSensorEncoder
+    'PoseSensor': PoseSensorEncoder,
+    'RGBCamera' : ImageEncoder,
+    'RGBCameracamera_info' : CameraInfoEncoder
     # Add other sensor type encoders here...
 }

@@ -46,6 +46,14 @@
               ros_publish: true
             - sensor_type: VelocitySensor
               ros_publish: true
+            - sensor_type: MagnetometerSensor
+              ros_publish: true
+            - sensor_type: PoseSensor
+              ros_publish: true
+            - sensor_type: RGBCamera
+              ros_publish: true
+            - sensor_type: DVLSensor
+              ros_publish: true
           dynamics:
             batch_size : 1
           control_abstraction : 'cmd_motor_speeds'

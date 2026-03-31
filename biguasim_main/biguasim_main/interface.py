@@ -153,7 +153,7 @@ class BiguaSimInterface():
                         for suffix in multi_publisher_sensors[sensor_type]:
                             full_type = f"{sensor['sensor_type']}{suffix}"
                             sensor_name = sensor['sensor_name'] if 'sensor_name' in sensor else sensor['sensor_type']
-                            full_name = f"{sensor_name}/{suffix}"
+                            full_name = f"{sensor_name}/{suffix}" if suffix != "" else sensor_name
                             
                             encoder_class = encoders.get(full_type)
                             sensor_copy = sensor.copy()  # Create a copy of the sensor dictionary
