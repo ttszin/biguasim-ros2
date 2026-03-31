@@ -12,7 +12,8 @@ multi_publisher_sensors = {
     'DVLSensor': ['Velocity', 'Range'],
     'DynamicsSensor': ['Odom', 'IMU'],
     'IMUSensor': ['', 'Bias'],
-    'RGBCamera': ['', 'camera_info']
+    'RGBCamera': ['', 'camera_info'],
+    'DepthCamera': ['', 'camera_info']
 }
 
 class SensorPublisher(ABC):
@@ -491,6 +492,36 @@ class CameraInfoEncoder(SensorPublisher):
         msg.d = [0.0, 0.0, 0.0, 0.0, 0.0]
 
         return msg
+    
+class DepthMapEncoder(SensorPublisher):
+    def __init__(self, sensor_dict):
+        super().__init__(sensor_dict)
+
+        self.message_type = Image
+    
+    def encode(self, sensor_data):
+        msg = self.message_type()
+        msg.header.frame_id = self.socket
+
+        # Ensure correct height and width
+        msg.height = sensor_data.shape[0]  # Rows
+        msg.width = sensor_data.shape[1]   # Columns
+
+        # Step calculation
+        msg.step = msg.width * 4 
+        msg.encoding = "bgr8"
+        msg.is_bigendian = 0
+
+        # Convert to bytes
+        msg.data = sensor_data.tobytes()
+
+        # Debugging: Check expected vs actual size
+        expected_size = msg.height * msg.step
+        actual_size = len(msg.data)
+        if expected_size != actual_size:
+            print(f"ERROR: Expected data size {expected_size}, but got {actual_size}")
+
+        return msg
         
 # Define other encoders similarly...
 
@@ -509,6 +540,8 @@ encoders = {
     'MagnetometerSensor': MagneticFieldEncoder,
     'PoseSensor': PoseSensorEncoder,
     'RGBCamera' : ImageEncoder,
-    'RGBCameracamera_info' : CameraInfoEncoder
+    'RGBCameracamera_info' : CameraInfoEncoder,
+    'DepthCamera' : DepthMapEncoder,
+    'DepthCameracamera_info' : CameraInfoEncoder
     # Add other sensor type encoders here...
 }
