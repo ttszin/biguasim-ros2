@@ -1,8 +1,8 @@
 from abc import ABC, abstractmethod
-from sensor_msgs.msg import Imu, MagneticField, Image, CameraInfo, LaserScan
+from sensor_msgs.msg import Imu, MagneticField, Image, CameraInfo, LaserScan, PointCloud2
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Vector3Stamped, PoseWithCovarianceStamped, TwistWithCovarianceStamped
-from biguasim_interfaces.msg import DVLSensorRange
+from biguasim_interfaces.msg import DVLSensorRange, ImagingSonar
 from scipy.spatial.transform import Rotation
 import numpy as np
 
@@ -563,6 +563,81 @@ class LaserScanEncoder(SensorPublisher):
         msg.ranges = sensor_data.tolist()
 
         return msg
+    
+class ImagingSonarEncoder(SensorPublisher):
+    def __init__(self, sensor_dict):
+        super().__init__(sensor_dict)
+
+        self.message_type = ImagingSonar
+
+        self.bins_azimuth = self.config["AzimuthBins"]
+        self.bins_range = self.config["RangeBins"]
+    
+    def encode(self, sensor_data):
+        msg = self.message_type()
+        msg.header.frame_id = self.socket
+
+        msg.bins_azimuth = self.bins_azimuth
+        msg.bins_range = self.bins_range
+
+        raw_msg = Image()
+        raw_data = sensor_data['raw']
+        raw_data = np.ascontiguousarray(raw_data.astype(np.float32))
+
+        raw_msg.height, raw_msg.width = raw_data.shape
+        raw_msg.encoding = "32FC1"
+        raw_msg.is_bigendian = 0
+        raw_msg.step = raw_msg.width * 4
+        raw_msg.data = raw_data.tobytes()
+
+        msg.raw_image = raw_msg
+
+        if 'gt_intensity' in sensor_data:
+            intensity_msg = Image()
+
+            intensity_data = sensor_data['gt_intensity']
+            intensity_data = np.ascontiguousarray(intensity_data.astype(np.float32))
+
+            intensity_msg.height, intensity_msg.width = intensity_data.shape
+            intensity_msg.encoding = "32FC1"
+            intensity_msg.is_bigendian = 0
+            intensity_msg.step = intensity_msg.width * 4
+            intensity_msg.data = intensity_data.tobytes()
+
+            msg.intensity = intensity_msg
+
+        if 'gt_elevation' in sensor_data:
+            elevation_msg = Image()
+
+            elevation_data = sensor_data['gt_elevation']
+            elevation_data = np.ascontiguousarray(elevation_data.astype(np.float32))
+
+            elevation_msg.height, elevation_msg.width = elevation_data.shape
+            elevation_msg.encoding = "32FC1"
+            elevation_msg.is_bigendian = 0
+            elevation_msg.step = elevation_msg.width * 4
+            elevation_msg.data = elevation_data.tobytes()
+
+            msg.elevation = elevation_msg
+        
+        if 'pointcloud' in sensor_data:
+            pointcloud_msg = PointCloud2()
+            points = sensor_data['pointcloud']
+            pointcloud_msg.height = 1
+            pointcloud_msg.width = points.shape[0]
+
+            pointcloud_msg.is_bigendian = False
+            pointcloud_msg.point_step = 16  # 4 fields * 4 bytes
+            pointcloud_msg.row_step = pointcloud_msg.point_step * points.shape[0]
+
+            pointcloud_msg.is_dense = True
+
+            pointcloud_msg.data = np.asarray(points, dtype=np.float32).tobytes()
+
+            msg.point_cloud = pointcloud_msg
+
+        
+        return msg
         
 # Define other encoders similarly...
 
@@ -587,5 +662,6 @@ encoders = {
     'AnnotationComponent' : ImageEncoder,
     'AnnotationComponentcamera_info' : CameraInfoEncoder,
     'RangeFinderSensor': LaserScanEncoder,
+    'ImagingSonar' : ImagingSonarEncoder
     # Add other sensor type encoders here...
 }

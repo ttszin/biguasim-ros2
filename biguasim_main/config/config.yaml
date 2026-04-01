@@ -40,20 +40,27 @@
               configuration:
                 UseCOM: true
                 UseRPY: false
-            - sensor_type: LocationSensor
+            - sensor_type: ImagingSonar
               ros_publish: true
-            - sensor_type: RotationSensor
-              ros_publish: true
-            - sensor_type: VelocitySensor
-              ros_publish: true
-            - sensor_type: MagnetometerSensor
-              ros_publish: true
-            - sensor_type: PoseSensor
-              ros_publish: true
-            - sensor_type: RGBCamera
-              ros_publish: true
-            - sensor_type: DVLSensor
-              ros_publish: true
+              configuration:
+                RangeBins: 64
+                AzimuthBins: 64
+                RangeMin: 0
+                RangeMax: 40
+                InitOctreeRange: 20
+                Elevation: 28
+                Azimuth: 28.8
+                AzimuthStreaks: -1
+                ScaleNoise: true
+                AddSigma: 0.15
+                MultSigma: 0.2
+                RangeSigma: 0.0
+                MultiPath: true
+                ViewRegion: true
+                ViewOctree: -1
+                # SendGTElevation: true
+                # SendGTIntensity: true
+                SendGTPointCloud: true
           dynamics:
             batch_size : 1
           control_abstraction : 'cmd_motor_speeds'
