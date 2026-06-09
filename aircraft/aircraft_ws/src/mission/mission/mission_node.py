@@ -14,11 +14,19 @@ import yaml
 
 from action_msgs.msg import GoalStatus
 from sensor_msgs.msg import NavSatFix
+from std_msgs.msg import String
 from mavros_msgs.msg import VfrHud
 from vision_msgs.msg import Detection2DArray
-from px4_msgs.msg import VehicleGlobalPosition, AirspeedValidated
+try:
+    from px4_msgs.msg import VehicleGlobalPosition, AirspeedValidated
+    _PX4_AVAILABLE = True
+except ImportError:
+    _PX4_AVAILABLE = False
 
-from ground_system_msgs.msg import SwarmObs
+try:
+    from ground_system_msgs.msg import SwarmObs
+except ImportError:
+    pass
 from state_sharing.msg import SharedState
 from autopilot_interface_msgs.action import Land, Offboard, Takeoff, Orbit
 from autopilot_interface_msgs.srv import SetSpeed, SetReposition
@@ -70,6 +78,11 @@ class MissionNode(Node):
         self.active_state_sharing_subs = {}
         self.drone_states = {}
         self.STALE_DRONE_TIMEOUT_SEC = 5.0 # Time after which we prune a drone from drone_states
+        # Navigation mode (published by validador_t2)
+        self.current_nav_mode = 'AERIAL_NAV'
+        self.nav_mode_wait_target = None
+        self.nav_mode_wait_start = None
+        self.nav_mode_wait_timeout = 30.0
 
         # Create a reentrant callback groups to allow callbacks to run in parallel
         self.subscriber_callback_group = ReentrantCallbackGroup()
@@ -82,13 +95,14 @@ class MissionNode(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT,
             depth=10
         )
-        # PX4 subscribers
-        self.create_subscription( # 100Hz
-            VehicleGlobalPosition, 'fmu/out/vehicle_global_position', self.px4_global_position_callback,
-            self.qos_profile, callback_group=self.subscriber_callback_group)
-        self.create_subscription( # 10Hz
-            AirspeedValidated, '/fmu/out/airspeed_validated', self.airspeed_validated_callback,
-            self.qos_profile, callback_group=self.subscriber_callback_group)
+        # PX4 subscribers (only when px4_msgs is available)
+        if _PX4_AVAILABLE:
+            self.create_subscription( # 100Hz
+                VehicleGlobalPosition, 'fmu/out/vehicle_global_position', self.px4_global_position_callback,
+                self.qos_profile, callback_group=self.subscriber_callback_group)
+            self.create_subscription( # 10Hz
+                AirspeedValidated, '/fmu/out/airspeed_validated', self.airspeed_validated_callback,
+                self.qos_profile, callback_group=self.subscriber_callback_group)
         # MAVROS subscribers
         self.create_subscription( # 4Hz
             NavSatFix, '/mavros/global_position/global', self.mavros_global_position_callback,
@@ -100,6 +114,10 @@ class MissionNode(Node):
         self.create_subscription( # 15Hz
             Detection2DArray, '/detections', self.yolo_detections_callback,
             self.qos_profile, callback_group=self.subscriber_callback_group)
+        # Navigation mode (from validador_t2 via hydro_sensor_bridge)
+        self.create_subscription(
+            String, '/nav_mode', self.nav_mode_callback,
+            10, callback_group=self.subscriber_callback_group)
         # self.create_subscription( # 1Hz
         #     SwarmObs, '/tracks', self.ground_tracks_callback,
         #     self.qos_profile, callback_group=self.subscriber_callback_group)
@@ -126,11 +144,18 @@ class MissionNode(Node):
             callback_group=self.timer_callback_group
         )
 
-        # Actions
-        self._takeoff_client = ActionClient(self, Takeoff, 'takeoff_action', callback_group=self.action_callback_group)
-        self._land_client = ActionClient(self, Land, 'land_action', callback_group=self.action_callback_group)
-        self._orbit_client = ActionClient(self, Orbit, 'orbit_action', callback_group=self.action_callback_group)
-        self._offboard_client = ActionClient(self, Offboard, 'offboard_action', callback_group=self.action_callback_group)
+        # Actions — use absolute paths when drone_id is known, consistent with services
+        if self.own_drone_id is not None:
+            ns = f'/Drone{self.own_drone_id}'
+            self._takeoff_client = ActionClient(self, Takeoff, f'{ns}/takeoff_action', callback_group=self.action_callback_group)
+            self._land_client = ActionClient(self, Land, f'{ns}/land_action', callback_group=self.action_callback_group)
+            self._orbit_client = ActionClient(self, Orbit, f'{ns}/orbit_action', callback_group=self.action_callback_group)
+            self._offboard_client = ActionClient(self, Offboard, f'{ns}/offboard_action', callback_group=self.action_callback_group)
+        else:
+            self._takeoff_client = ActionClient(self, Takeoff, 'takeoff_action', callback_group=self.action_callback_group)
+            self._land_client = ActionClient(self, Land, 'land_action', callback_group=self.action_callback_group)
+            self._orbit_client = ActionClient(self, Orbit, 'orbit_action', callback_group=self.action_callback_group)
+            self._offboard_client = ActionClient(self, Offboard, 'offboard_action', callback_group=self.action_callback_group)
 
         # Services
         if self.own_drone_id is not None:
@@ -171,6 +196,10 @@ class MissionNode(Node):
     def yolo_detections_callback(self, msg):
         with self.data_lock:
             self.yolo_detections = msg
+
+    def nav_mode_callback(self, msg):
+        with self.data_lock:
+            self.current_nav_mode = msg.data
 
     def discover_drones_callback(self):
         topic_prefix = '/state_sharing_drone_'
@@ -271,12 +300,14 @@ class MissionNode(Node):
     def send_goal(self, client, goal_msg):
         if self.active_mission_goal_handle is not None:
             self.get_logger().info("An action is already in progress. Cannot send new goal.")
-            return
-        self.get_logger().info('Waiting for action server...')
-        client.wait_for_server()
+            return False
+        if not client.server_is_ready():
+            self.get_logger().warn('Action server not ready, retrying next cycle...')
+            return False
         self.get_logger().info('Sending goal request...')
         send_goal_future = client.send_goal_async(goal_msg, feedback_callback=self.feedback_callback)
         send_goal_future.add_done_callback(self.goal_response_callback)
+        return True
 
     def goal_response_callback(self, future):
         goal_handle = future.result()
@@ -328,6 +359,24 @@ class MissionNode(Node):
         if self.active_mission_goal_handle is not None:
             return
 
+        # If waiting for a nav mode transition, poll current mode
+        if self.nav_mode_wait_target is not None:
+            with self.data_lock:
+                current_mode = self.current_nav_mode
+            if current_mode == self.nav_mode_wait_target:
+                self.get_logger().info(f"Nav mode '{self.nav_mode_wait_target}' confirmed.")
+                self.nav_mode_wait_target = None
+                self.nav_mode_wait_start = None
+                self.mission_step += 1
+            else:
+                elapsed = (self.get_clock().now() - self.nav_mode_wait_start).nanoseconds / 1e9
+                if elapsed > self.nav_mode_wait_timeout:
+                    self.get_logger().error(
+                        f"Timeout waiting for nav mode '{self.nav_mode_wait_target}'.")
+                    self.mission_step = -1
+                    self.nav_mode_wait_target = None
+            return
+
         # If a "Wait" is active, check time: if still waiting, return. If done, clear wait and proceed
         if self.wait_start_time is not None:
             elapsed = (self.get_clock().now() - self.wait_start_time).nanoseconds / 1e9
@@ -357,9 +406,9 @@ class MissionNode(Node):
         action_type = step['action']
         params = step.get('params', {})
         self.get_logger().info(f"Executing step {self.mission_step}: {action_type}")
-        self.last_executed_step = self.mission_step
 
         if action_type == 'wait':
+            self.last_executed_step = self.mission_step
             self.wait_start_time = self.get_clock().now()
             self.current_wait_duration = float(params.get('duration', 0.0))
             return
@@ -371,13 +420,15 @@ class MissionNode(Node):
             goal.vtol_loiter_nord = float(params.get('vtol_loiter_nord', 100.0))
             goal.vtol_loiter_east = float(params.get('vtol_loiter_east', 100.0))
             goal.vtol_loiter_alt = float(params.get('vtol_loiter_alt', 120.0))
-            self.send_goal(self._takeoff_client, goal)
-        
+            if not self.send_goal(self._takeoff_client, goal):
+                return
+
         elif action_type == 'land':
             goal = Land.Goal()
             goal.landing_altitude = float(params.get('landing_altitude', 20.0))
             goal.vtol_transition_heading = float(params.get('vtol_transition_heading', 0.0))
-            self.send_goal(self._land_client, goal)
+            if not self.send_goal(self._land_client, goal):
+                return
 
         elif action_type == 'orbit':
             goal = Orbit.Goal()
@@ -385,8 +436,9 @@ class MissionNode(Node):
             goal.north = float(params.get('north', 0.0))
             goal.altitude = float(params.get('altitude', 20.0))
             goal.radius = float(params.get('radius', 10.0))
-            self.send_goal(self._orbit_client, goal)
-            
+            if not self.send_goal(self._orbit_client, goal):
+                return
+
         elif action_type == 'offboard':
             if (os.getenv('AUTOPILOT', '') == 'ardupilot') and (os.getenv('DRONE_TYPE', '') != 'quad'):
                 self.get_logger().warn("Offboard action is not supported by Ardupilot VTOL. Skip.")
@@ -396,9 +448,10 @@ class MissionNode(Node):
             goal = Offboard.Goal()
             goal.offboard_setpoint_type = int(params.get('offboard_setpoint_type', default_setpoint_type))
             goal.max_duration_sec = float(params.get('max_duration_sec', 10.0))
-            self.send_goal(self._offboard_client, goal)
+            if not self.send_goal(self._offboard_client, goal):
+                return
 
-        elif action_type == 'reposition':
+        elif action_type in ('reposition', 'go_to_known_gps_waypoint'):
             if os.getenv('DRONE_TYPE', '') != 'quad':
                 self.get_logger().warn("Reposition action is only supported for 'quad' drone type. Skip.")
                 self.mission_step += 1
@@ -414,9 +467,26 @@ class MissionNode(Node):
             req.speed = float(params.get('speed', 15.0))
             self.call_service(self._speed_client, req)
 
+        elif action_type == 'wait_for_nav_mode':
+            target_mode = str(params.get('mode', 'AERIAL_NAV'))
+            timeout = float(params.get('timeout', 30.0))
+            with self.data_lock:
+                current_mode = self.current_nav_mode
+            if current_mode == target_mode:
+                self.get_logger().info(f"Nav mode already '{target_mode}'.")
+                self.mission_step += 1
+                return
+            self.get_logger().info(f"Waiting for nav mode '{target_mode}' (timeout={timeout}s)...")
+            self.nav_mode_wait_target = target_mode
+            self.nav_mode_wait_start = self.get_clock().now()
+            self.nav_mode_wait_timeout = timeout
+
         else:
             self.get_logger().error(f"Unknown action: {action_type}")
             self.mission_step = -1
+            return
+
+        self.last_executed_step = self.mission_step
 
 def main(args=None):
     parser = argparse.ArgumentParser(description="Mission Node.")

@@ -1,0 +1,13 @@
+steps:
+  - action: takeoff
+    params:
+      takeoff_altitude: 5.0
+
+  - action: wait
+    params:
+      duration: 180.0
+
+  - action: land
+    params:
+      landing_altitude: 0.0
+      vtol_transition_heading: 0.0

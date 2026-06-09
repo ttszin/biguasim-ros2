@@ -1,0 +1,66 @@
+steps:
+  - action: takeoff
+    params:
+      takeoff_altitude: 2.5
+      vtol_loiter_alt: 2.5
+
+  # Fly to position above the tank (world x=10, y=0 → ENU East=10, North=0)
+  - action: reposition
+    params:
+      north: 0.0
+      east: 10.0
+      altitude: 2.5
+
+  - action: wait
+    params:
+      duration: 10.0
+
+  # Descend toward tank (SITL min altitude ~2.1m; water surface set to 2.3m so drone IS submerged at 2.1m)
+  - action: reposition
+    params:
+      north: 0.0
+      east: 10.0
+      altitude: 0.4
+
+  # Block until hydro_sensor_bridge + validador_t2 confirm AQUATIC_NAV
+  - action: wait_for_nav_mode
+    params:
+      mode: AQUATIC_NAV
+      timeout: 20.0
+
+  - action: wait
+    params:
+      duration: 5.0
+
+  # Ascend out of the water
+  - action: reposition
+    params:
+      north: 0.0
+      east: 10.0
+      altitude: 2.5
+
+  # Block until sensor confirms AERIAL_NAV (pressure back to atmospheric)
+  - action: wait_for_nav_mode
+    params:
+      mode: AERIAL_NAV
+      timeout: 20.0
+
+  - action: wait
+    params:
+      duration: 3.0
+
+  # Return to origin
+  - action: reposition
+    params:
+      north: 0.0
+      east: 0.0
+      altitude: 2.5
+
+  - action: wait
+    params:
+      duration: 10.0
+
+  - action: land
+    params:
+      landing_altitude: 0.0
+      vtol_transition_heading: 0.0

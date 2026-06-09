@@ -1,0 +1,61 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="tanque_agua">
+    <static>true</static>
+
+    <plugin filename="gz-waves1-waves-model-system"
+            name="gz::sim::systems::WavesModel">
+      <static>0</static>
+      <update_rate>30</update_rate>
+      <wave>
+        <algorithm>fft</algorithm>
+        <tile_size>5</tile_size>
+        <cell_count>32</cell_count>
+        <wind_speed>2.0</wind_speed>
+        <wind_angle_deg>135</wind_angle_deg>
+        <steepness>2</steepness>
+      </wave>
+    </plugin>
+
+    <link name="base_link">
+      <visual name="visual">
+        <geometry>
+          <mesh>
+            <uri>materials/mesh_L5m_N32.dae</uri>
+          </mesh>
+        </geometry>
+
+        <material>
+          <ambient>0.0 0.05 0.8 0.92</ambient>
+          <diffuse>0.0 0.1 0.7 0.92</diffuse>
+          <specular>0.7 0.7 0.7 0.92</specular>
+          <pbr>
+            <metal>
+              <albedo_map>materials/water.jpg</albedo_map>
+              <normal_map>materials/wave_normals.dds</normal_map>
+              <environment_map>materials/skybox_lowres.dds</environment_map>
+              <roughness>0.3</roughness>
+              <metalness>0.1</metalness>
+            </metal>
+          </pbr>
+        </material>
+
+        <plugin filename="gz-waves1-waves-visual-system"
+                name="gz::sim::systems::WavesVisual">
+          <static>0</static>
+          <mesh_deformation_method>DYNAMIC_GEOMETRY</mesh_deformation_method>
+          <tiles_x>-0 0</tiles_x>
+          <tiles_y>-0 0</tiles_y>
+          <wave>
+            <algorithm>fft</algorithm>
+            <tile_size>5</tile_size>
+            <cell_count>32</cell_count>
+            <wind_speed>2.0</wind_speed>
+            <wind_angle_deg>135</wind_angle_deg>
+            <steepness>2</steepness>
+          </wave>
+        </plugin>
+      </visual>
+    </link>
+  </model>
+</sdf>

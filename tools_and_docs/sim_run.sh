@@ -18,7 +18,7 @@ NUM_QUADS="${NUM_QUADS:-1}" # Number of quadcopters (default = 1)
 NUM_VTOLS="${NUM_VTOLS:-0}" # Number of VTOLs (default = 0)
 WORLD="${WORLD:-impalpable_greyness}" # Options: impalpable_greyness (default), apple_orchard, shibuya_crossing, swiss_town
 #
-DEV="${DEV:false}" # Options: true, false (default)
+DEV="${DEV:-true}" # Options: true (default), false
 HITL="${HITL:-false}" # Options: true, false (default)
 GND_CONTAINER="${GND_CONTAINER:-true}" # Options: true (default), false
 RTF="${RTF:-1.0}" # Real-time factor (default = 1.0), set to <=0.0 for as fast as possible execution
@@ -51,11 +51,9 @@ echo "Desktop environment: $DESK_ENV"
 if [[ "$DEV" == "true" ]]; then
   SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
   #
-  DEV_SIM_OPTS="--entrypoint /bin/bash"
-  DEV_SIM_OPTS+=" -v ${SCRIPT_DIR}/../simulation/simulation_resources/:/aas/simulation_resources:cached"
+  DEV_SIM_OPTS=""
   #
-  DEV_GND_OPTS="--entrypoint /bin/bash"
-  DEV_GND_OPTS+=" -v ${SCRIPT_DIR}/../ground/ground_resources/:/aas/ground_resources:cached"
+  DEV_GND_OPTS="-v ${SCRIPT_DIR}/../ground/ground_resources/:/aas/ground_resources:cached"
   DEV_GND_OPTS+=" -v ${SCRIPT_DIR}/../ground/ground_ws/src:/aas/ground_ws/src:cached"
   #
   DEV_AIR_OPTS="--entrypoint /bin/bash"

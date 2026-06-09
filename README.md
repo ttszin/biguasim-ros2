@@ -604,3 +604,22 @@ docker builder prune                  # Clear all dangling cache
 ```
 
 -->
+
+
+Comandos para a missão
+
+MicroXRCEAgent udp4 -p 8888 &
+ros2 run autopilot_interface px4_interface --ros-args -r __ns:=/Drone1 -p use_sim_time:=true &
+ros2 run offboard_control px4_offboard --ros-args -r __ns:=/Drone1 -p use_sim_time:=true &
+
+python3 /aas/aircraft_resources/missions/hydro_sensor_bridge.py &
+python3 /aas/aircraft_resources/missions/validador_t2.py &
+ros2 run mission mission --conops t2_test_mission.yaml --ros-args -r __ns:=/Drone1 -p use_sim_time:=true
+
+
+docker exec -it aircraft-container-inst0_1 bash
+
+resetar posição do drone (TEM QUE SER NO TERMINAL DE SIMULATION)
+
+
+python3 /aas/simulation_resources/scripts/gz_reset.py --model x500_0 --x 0 --y 0 --z 0.2

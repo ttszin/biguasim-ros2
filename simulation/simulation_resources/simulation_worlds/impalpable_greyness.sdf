@@ -5,7 +5,7 @@
     <!-- Gazebo/PX4 pyhsics, it is overridden when using Ardupilot -->
     <physics type="ode">
       <max_step_size>0.004</max_step_size>
-      <real_time_factor>1.0</real_time_factor>
+      <real_time_factor>1</real_time_factor>
       <real_time_update_rate>250</real_time_update_rate>
     </physics>
     <plugin name="gz::sim::systems::Physics" filename="gz-sim-physics-system">
@@ -16,6 +16,10 @@
         <!-- libgz-physics-bullet-plugin libgz-physics-bullet-featherstone-plugin libgz-physics-tpe-plugin -->
       </engine>
     </plugin>
+    <!-- Buoyancy plugin removed: gz-sim-buoyancy-system has no support for bounded fluid
+         volumes — any graded/uniform config applies globally and disturbs PX4 during
+         takeoff and landing outside the tank. Submersion detection is handled entirely
+         by hydro_sensor_bridge.py (bounding-box + Z check). -->
     <plugin name="gz::sim::systems::UserCommands" filename="gz-sim-user-commands-system"/>
     <plugin name="gz::sim::systems::SceneBroadcaster" filename="gz-sim-scene-broadcaster-system"/>
     <plugin name="gz::sim::systems::Contact" filename="gz-sim-contact-system"/>
@@ -549,6 +553,13 @@
         <static>true</static>
       </include>
 
+      <include>
+        <uri>model://tanque_oco</uri>
+        <pose>10.0 0.0 0.0 0 0 0</pose>
+        <static>true</static>
+      </include>
+    </model>
+
       <!-- <include>
         <uri>model://crash</uri>
         <pose degrees="true">5 40 3.75 0 0 0</pose>
@@ -562,9 +573,14 @@
       <!-- <include>
         <uri>model://suburb</uri>
         <pose degrees="true">25 -205 -0.6 0 0 180</pose>
-      </include> -->  
-        
-    </model>
+      </include> -->
+
+    <!-- Animated water surface inside the tank — model uses asv_wave_sim WavesVisual plugin
+         with a custom 5m x 5m mesh. Positioned at z=1.5 (water surface level). -->
+    <include>
+      <uri>model://tanque_agua</uri>
+      <pose>10.0 0.0 1.5 0 0 0</pose>
+    </include>
 
   </world>
 </sdf>

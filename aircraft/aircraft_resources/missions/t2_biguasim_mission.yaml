@@ -1,0 +1,53 @@
+steps:
+  - action: takeoff
+    params:
+      takeoff_altitude: 5.0
+
+  # Fly to position above the river in the Bridge world.
+  # north=17m east=0m: water at Biguasim x=25,y=0 relative to spawn x=8,y=0
+  - action: go_to_known_gps_waypoint
+    params:
+      north: 20.0
+      east: 0.0
+      altitude: 5.0
+
+  # Descend into the water.
+  # home_alt ≈ 13.4m (spawn z in Biguasim). Water surface at world z≈0.
+  # altitude = world_z_target - home_alt → -15 puts drone at world z≈-1.6m (inside water).
+  - action: go_to_known_gps_waypoint
+    params:
+      north: 20.0
+      east: 0.0
+      altitude: -15.0
+
+  # Block until biguasim_bridge_runner + validador_t2 confirm AQUATIC_NAV.
+  - action: wait_for_nav_mode
+    params:
+      mode: AQUATIC_NAV
+      timeout: 60.0
+
+  - action: wait
+    params:
+      duration: 5.0
+
+  # Ascend out of the water
+  - action: go_to_known_gps_waypoint
+    params:
+      north: 20.0
+      east: 0.0
+      altitude: 15.0
+
+  # Block until sensor confirms AERIAL_NAV (pressure back to atmospheric)
+  - action: wait_for_nav_mode
+    params:
+      mode: AERIAL_NAV
+      timeout: 60.0
+
+  - action: wait
+    params:
+      duration: 3.0
+
+  - action: land
+    params:
+      landing_altitude: 0.0
+      vtol_transition_heading: 0.0

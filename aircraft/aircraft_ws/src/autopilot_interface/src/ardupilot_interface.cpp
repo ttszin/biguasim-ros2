@@ -26,9 +26,9 @@ ArdupilotInterface::ArdupilotInterface() : Node("ardupilot_interface"),
     angular_velocity_.fill(NAN);
 
     // MAVROS Publishers
-    rclcpp::QoS qos_profile_pub(10);  // Depth of 10
-    qos_profile_pub.durability(rclcpp::DurabilityPolicy::TransientLocal);  // Or rclcpp::DurabilityPolicy::Volatile
-    setpoint_pos_pub_= this->create_publisher<GeoPoseStamped>("/mavros/setpoint_position/global", qos_profile_pub);
+    rclcpp::QoS qos_profile_pub(10);
+    qos_profile_pub.durability(rclcpp::DurabilityPolicy::Volatile);
+    setpoint_pos_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/mavros/setpoint_position/local", qos_profile_pub);
 
     // Offboard flag publisher
     offboard_flag_pub_ = this->create_publisher<autopilot_interface_msgs::msg::OffboardFlag>("/offboard_flag", qos_profile_pub);
@@ -179,8 +179,10 @@ void ArdupilotInterface::state_callback(const State::SharedPtr msg)
     armed_flag_ = msg->armed;
     mav_state_ = msg->system_status; // MAV_STATE: MAV_STATE_CALIBRATING = 2, MAV_STATE_STANDBY = 3, MAV_STATE_ACTIVE = 4 (0: unkown, 5,6: failsafe, 8: flight termination, 1,7: boot)
     ardupilot_mode_ = msg->mode; // See https://github.com/mavlink/mavros/blob/ros2/mavros_msgs/msg/State.msg
-    if ((aircraft_fsm_state_ == ArdupilotInterfaceState::LANDED) && (mav_state_ == 3)) {
-        aircraft_fsm_state_ = ArdupilotInterfaceState::STARTED; // Reset ArduPilot interface state when in standby after landing
+    bool stuck_disarmed = (aircraft_fsm_state_ == ArdupilotInterfaceState::LANDED
+                           || aircraft_fsm_state_ == ArdupilotInterfaceState::ARMED);
+    if (stuck_disarmed && !armed_flag_ && (mav_state_ == 3)) {
+        aircraft_fsm_state_ = ArdupilotInterfaceState::STARTED;
     }
 }
 
@@ -347,27 +349,18 @@ void ArdupilotInterface::set_reposition_callback(const std::shared_ptr<autopilot
     double desired_north = request->north;
     double desired_alt = request->altitude;
     RCLCPP_INFO(this->get_logger(), "New requested reposition East-North %.2f %.2f Alt. %.2f", desired_east, desired_north, desired_alt);
-    auto [des_lat, des_lon] = lat_lon_from_cartesian(home_lat_, home_lon_, desired_east, desired_north);
-    double distance, heading;
-    geod.Inverse(lat_, lon_, des_lat, des_lon, distance, heading);
-    double yaw_enu_deg = 90.0 - heading;
-    if (yaw_enu_deg > 180.0) {
-        yaw_enu_deg -= 360.0;
-    } else if (yaw_enu_deg < -180.0) {
-        yaw_enu_deg += 360.0;
-    }
-    double yaw_enu_rad = yaw_enu_deg * M_PI / 180.0;
-    for (int i = 0; i < REPOSITION_PUB_RETRIES; ++i) { // Send multiple times for robustness
-        auto msg = geographic_msgs::msg::GeoPoseStamped();
+    // Publish as local ENU setpoint (x=east, y=north, z=up relative to home).
+    // Avoids GPS altitude frame ambiguity of setpoint_position/global.
+    for (int i = 0; i < REPOSITION_PUB_RETRIES; ++i) {
+        auto msg = geometry_msgs::msg::PoseStamped();
         msg.header.stamp = this->get_clock()->now();
         msg.header.frame_id = "map";
-        msg.pose.position.latitude = des_lat;
-        msg.pose.position.longitude = des_lon;
-        msg.pose.position.altitude = home_alt_ + desired_alt; // Altitude in MSL/relative to takeoff
-        msg.pose.orientation.w = cos(yaw_enu_rad / 2.0);
-        msg.pose.orientation.z = sin(yaw_enu_rad / 2.0);
+        msg.pose.position.x = desired_east;
+        msg.pose.position.y = desired_north;
+        msg.pose.position.z = desired_alt;
+        msg.pose.orientation.w = 1.0; // Keep current yaw
         setpoint_pos_pub_->publish(msg);
-        std::this_thread::sleep_for(std::chrono::milliseconds(REPOSITION_REQ_DELAY_MS)); // Add a small delay between publishes
+        std::this_thread::sleep_for(std::chrono::milliseconds(REPOSITION_REQ_DELAY_MS));
     }
     response->success = true;
     response->message = "set_reposition request sent";
@@ -957,19 +950,31 @@ void ArdupilotInterface::takeoff_handle_accepted(const std::shared_ptr<rclcpp_ac
                 call_service_and_update_fsm<SetMode, autopilot_interface_msgs::action::Takeoff>(
                     set_mode_client_, set_mode_request, goal_handle,
                     "Request mode", ArdupilotInterfaceState::GUIDED_PRETAKEOFF);
-            } else if ((current_fsm_state == ArdupilotInterfaceState::GUIDED_PRETAKEOFF) && (current_time_us > (time_of_last_srv_req_us_ + ACTION_REQ_DELAY_SEC * 1000000))) {
-                auto arm_request = std::make_shared<CommandBool::Request>();
-                arm_request->value = true;
-                time_of_last_srv_req_us_ = current_time_us;
-                call_service_and_update_fsm<CommandBool, autopilot_interface_msgs::action::Takeoff>(
-                    arming_client_, arm_request, goal_handle,
-                    "Request arm", ArdupilotInterfaceState::ARMED);
+            } else if (current_fsm_state == ArdupilotInterfaceState::GUIDED_PRETAKEOFF) {
+                if (armed_flag_) {
+                    // Drone is armed — advance FSM regardless of how arming happened
+                    std::unique_lock<std::shared_mutex> lock(node_data_mutex_);
+                    aircraft_fsm_state_ = ArdupilotInterfaceState::ARMED;
+                } else if (current_time_us > (time_of_last_srv_req_us_ + ACTION_REQ_DELAY_SEC * 1000000)) {
+                    // Force arm every second; FSM advances when armed_flag_ becomes true
+                    time_of_last_srv_req_us_ = current_time_us;
+                    auto arm_request = std::make_shared<CommandLong::Request>();
+                    arm_request->command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
+                    arm_request->param1 = 1.0f;
+                    arm_request->param2 = 2989.0f; // force arm magic number (same as MAVProxy)
+                    command_long_client_->async_send_request(arm_request,
+                        [this](rclcpp::Client<CommandLong>::SharedFuture future) {
+                            RCLCPP_INFO(this->get_logger(), "Force arm: %s",
+                                future.get()->success ? "accepted" : "rejected, retrying");
+                        });
+                }
             } else if ((current_fsm_state == ArdupilotInterfaceState::ARMED) && (current_time_us > (time_of_last_srv_req_us_ + ACTION_REQ_DELAY_SEC * 1000000))) {
-                auto takeoff_request = std::make_shared<CommandTOL::Request>();
-                takeoff_request->altitude = takeoff_altitude;
+                auto takeoff_request = std::make_shared<CommandLong::Request>();
+                takeoff_request->command = 22; // MAV_CMD_NAV_TAKEOFF
+                takeoff_request->param7 = takeoff_altitude; // relative to home
                 time_of_last_srv_req_us_ = current_time_us;
-                call_service_and_update_fsm<CommandTOL, autopilot_interface_msgs::action::Takeoff>(
-                    takeoff_client_, takeoff_request, goal_handle,
+                call_service_and_update_fsm<CommandLong, autopilot_interface_msgs::action::Takeoff>(
+                    command_long_client_, takeoff_request, goal_handle,
                     "Request takeoff", ArdupilotInterfaceState::MC_HOVER);
             } else if (current_fsm_state == ArdupilotInterfaceState::MC_HOVER) {
                 if ((alt_ - home_alt_) > MC_TAKEOFF_COMPLETED_RATIO * takeoff_altitude) {
@@ -987,11 +992,13 @@ void ArdupilotInterface::takeoff_handle_accepted(const std::shared_ptr<rclcpp_ac
                     set_mode_client_, set_mode_request, goal_handle,
                     "Request mode", ArdupilotInterfaceState::VTOL_QLOITER_PRETAKEOFF);
             } else if ((current_fsm_state == ArdupilotInterfaceState::VTOL_QLOITER_PRETAKEOFF) && (current_time_us > (time_of_last_srv_req_us_ + ACTION_REQ_DELAY_SEC * 1000000))) {
-                auto arm_request = std::make_shared<CommandBool::Request>();
-                arm_request->value = true;
+                auto arm_request = std::make_shared<CommandLong::Request>();
+                arm_request->command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
+                arm_request->param1 = 1.0f;
+                arm_request->param2 = 21196.0f; // force arm, bypass pre-arm checks
                 time_of_last_srv_req_us_ = current_time_us;
-                call_service_and_update_fsm<CommandBool, autopilot_interface_msgs::action::Takeoff>(
-                    arming_client_, arm_request, goal_handle,
+                call_service_and_update_fsm<CommandLong, autopilot_interface_msgs::action::Takeoff>(
+                    command_long_client_, arm_request, goal_handle,
                     "Request arm", ArdupilotInterfaceState::ARMED);
             } else if ((current_fsm_state == ArdupilotInterfaceState::ARMED) && (current_time_us > (time_of_last_srv_req_us_ + ACTION_REQ_DELAY_SEC * 1000000))) {
                 auto set_mode_request = std::make_shared<SetMode::Request>();

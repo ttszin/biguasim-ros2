@@ -1,0 +1,94 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <model name="tanque_oco">
+    <static>true</static>
+    <link name="base_link">
+
+      <collision name="piso_collision">
+        <pose>0 0 0.05 0 0 0</pose>
+        <geometry>
+          <box><size>5.0 5.0 0.1</size></box>
+        </geometry>
+      </collision>
+      <visual name="piso_visual">
+        <pose>0 0 0.05 0 0 0</pose>
+        <geometry>
+          <box><size>5.0 5.0 0.1</size></box>
+        </geometry>
+        <material>
+          <ambient>0.1 0.3 0.8 1.0</ambient>
+          <diffuse>0.1 0.3 0.8 1.0</diffuse>
+        </material>
+      </visual>
+
+      <collision name="parede_norte_collision">
+        <pose>0 2.5 1.0 0 0 0</pose>
+        <geometry>
+          <box><size>5.0 0.1 2.0</size></box>
+        </geometry>
+      </collision>
+      <visual name="parede_norte_visual">
+        <pose>0 2.5 1.0 0 0 0</pose>
+        <geometry>
+          <box><size>5.0 0.1 2.0</size></box>
+        </geometry>
+        <material>
+          <ambient>0.6 0.6 0.6 0.3</ambient>
+          <diffuse>0.6 0.6 0.6 0.3</diffuse>
+        </material>
+      </visual>
+
+      <collision name="parede_sul_collision">
+        <pose>0 -2.5 1.0 0 0 0</pose>
+        <geometry>
+          <box><size>5.0 0.1 2.0</size></box>
+        </geometry>
+      </collision>
+      <visual name="parede_sul_visual">
+        <pose>0 -2.5 1.0 0 0 0</pose>
+        <geometry>
+          <box><size>5.0 0.1 2.0</size></box>
+        </geometry>
+        <material>
+          <ambient>0.6 0.6 0.6 0.3</ambient>
+          <diffuse>0.6 0.6 0.6 0.3</diffuse>
+        </material>
+      </visual>
+
+      <collision name="parede_leste_collision">
+        <pose>2.5 0 1.0 0 0 0</pose>
+        <geometry>
+          <box><size>0.1 5.0 2.0</size></box>
+        </geometry>
+      </collision>
+      <visual name="parede_leste_visual">
+        <pose>2.5 0 1.0 0 0 0</pose>
+        <geometry>
+          <box><size>0.1 5.0 2.0</size></box>
+        </geometry>
+        <material>
+          <ambient>0.6 0.6 0.6 0.3</ambient>
+          <diffuse>0.6 0.6 0.6 0.3</diffuse>
+        </material>
+      </visual>
+
+      <collision name="parede_oeste_collision">
+        <pose>-2.5 0 1.0 0 0 0</pose>
+        <geometry>
+          <box><size>0.1 5.0 2.0</size></box>
+        </geometry>
+      </collision>
+      <visual name="parede_oeste_visual">
+        <pose>-2.5 0 1.0 0 0 0</pose>
+        <geometry>
+          <box><size>0.1 5.0 2.0</size></box>
+        </geometry>
+        <material>
+          <ambient>0.6 0.6 0.6 0.3</ambient>
+          <diffuse>0.6 0.6 0.6 0.3</diffuse>
+        </material>
+      </visual>
+
+    </link>
+  </model>
+</sdf>

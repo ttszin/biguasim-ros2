@@ -1,0 +1,51 @@
+steps:
+  # 1. Espera crucial para o EKF do ArduPilot estabilizar o GPS antes de armar
+  - action: wait
+    params:
+      duration: 30.0
+
+  # 2. Decola um pouco para garantir que está estável no ar
+  - action: takeoff
+    params:
+      takeoff_altitude: 5.0
+
+  # 3. Vai até o mar
+  - action: go_to_known_gps_waypoint
+    params:
+      north: 20.0
+      east: 0.0
+      altitude: 5.0
+
+  # 3. Mergulha! (Muda apenas o Z para um valor negativo, mantém N/E no lugar)
+  - action: go_to_known_gps_waypoint
+    params:
+      north: 20.0
+      east: 0.0
+      altitude: -2.0
+
+  # 4. O Validador atua como juiz da transição
+  - action: wait_for_nav_mode
+    params:
+      mode: AQUATIC_NAV
+      timeout: 30.0
+
+  - action: wait
+    params:
+      duration: 5.0
+
+  # 5. Emerge da água de volta para os 5 metros
+  - action: go_to_known_gps_waypoint
+    params:
+      north: 0.0
+      east: 0.0
+      altitude: 5.0
+
+  - action: wait_for_nav_mode
+    params:
+      mode: AERIAL_NAV
+      timeout: 30.0
+
+  # 6. Pousa na superfície (ou doca)
+  - action: land
+    params:
+      landing_altitude: 0.0

@@ -21,6 +21,7 @@
 #include <GeographicLib/Geodesic.hpp>
 
 #include <geographic_msgs/msg/geo_pose_stamped.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 
 #include <mavros_msgs/msg/home_position.hpp>
 #include <mavros_msgs/msg/state.hpp>
@@ -181,7 +182,7 @@ private:
     double true_airspeed_m_s_, heading_;
 
     // MAVROS publishers
-    rclcpp::Publisher<GeoPoseStamped>::SharedPtr setpoint_pos_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr setpoint_pos_pub_;
 
     // Offboard flag publisher
     rclcpp::Publisher<autopilot_interface_msgs::msg::OffboardFlag>::SharedPtr offboard_flag_pub_;
