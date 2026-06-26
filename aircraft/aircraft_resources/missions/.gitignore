@@ -1,0 +1,10 @@
+# ROS/colcon build artifacts
+build/
+install/
+log/
+
+# MAVROS source package (downloaded for local build)
+ros-jazzy-mavros-*/
+ros-jazzy-mavros_*.debian.tar.xz
+ros-jazzy-mavros_*.dsc
+ros-jazzy-mavros_*.orig.tar.gz

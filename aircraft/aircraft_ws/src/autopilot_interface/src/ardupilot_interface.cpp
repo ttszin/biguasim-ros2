@@ -4,7 +4,7 @@ ArdupilotInterface::ArdupilotInterface() : Node("ardupilot_interface"),
     active_srv_or_act_flag_(false), aircraft_fsm_state_(ArdupilotInterfaceState::STARTED),
     offboard_flag_frequency(10), offboard_flag_count_(0), last_offboard_flag_count_(0),
     target_system_id_(-1), mav_state_(-1), mav_type_(-1),
-    armed_flag_(false), ardupilot_mode_(""),
+    armed_flag_(false), ardupilot_mode_(""), landed_state_(0),
     lat_(NAN), lon_(NAN), alt_(NAN), alt_ellipsoid_(NAN),
     x_(NAN), y_(NAN), z_(NAN),  vx_(NAN), vy_(NAN), vz_(NAN), ref_lat_(NAN), ref_lon_(NAN), ref_alt_(NAN),
     true_airspeed_m_s_(NAN), heading_(NAN),
@@ -29,6 +29,8 @@ ArdupilotInterface::ArdupilotInterface() : Node("ardupilot_interface"),
     rclcpp::QoS qos_profile_pub(10);
     qos_profile_pub.durability(rclcpp::DurabilityPolicy::Volatile);
     setpoint_pos_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/mavros/setpoint_position/local", qos_profile_pub);
+    setpoint_raw_global_pub_ = this->create_publisher<mavros_msgs::msg::GlobalPositionTarget>("/mavros/setpoint_raw/global", qos_profile_pub);
+    setpoint_raw_local_pub_  = this->create_publisher<mavros_msgs::msg::PositionTarget>("/mavros/setpoint_raw/local", qos_profile_pub);
 
     // Offboard flag publisher
     offboard_flag_pub_ = this->create_publisher<autopilot_interface_msgs::msg::OffboardFlag>("/offboard_flag", qos_profile_pub);
@@ -77,6 +79,9 @@ ArdupilotInterface::ArdupilotInterface() : Node("ardupilot_interface"),
     mavros_state_sub_ = this->create_subscription<State>(
         "/mavros/state", qos_profile_sub, //1Hz
         std::bind(&ArdupilotInterface::state_callback, this, std::placeholders::_1), subscriber_options);
+    mavros_extended_state_sub_ = this->create_subscription<mavros_msgs::msg::ExtendedState>(
+        "/mavros/extended_state", qos_profile_sub, // 1Hz
+        std::bind(&ArdupilotInterface::extended_state_callback, this, std::placeholders::_1), subscriber_options);
 
     // MAVROS service clients
     vehicle_info_client_ = this->create_client<VehicleInfoGet>("/mavros/vehicle_info_get");
@@ -184,6 +189,11 @@ void ArdupilotInterface::state_callback(const State::SharedPtr msg)
     if (stuck_disarmed && !armed_flag_ && (mav_state_ == 3)) {
         aircraft_fsm_state_ = ArdupilotInterfaceState::STARTED;
     }
+}
+void ArdupilotInterface::extended_state_callback(const mavros_msgs::msg::ExtendedState::SharedPtr msg)
+{
+    std::unique_lock<std::shared_mutex> lock(node_data_mutex_);
+    landed_state_ = msg->landed_state; // 0=UNDEFINED, 1=ON_GROUND, 2=IN_AIR, 3=TAKEOFF, 4=LANDING
 }
 
 // Callbacks for timers (reentrant group)
@@ -349,17 +359,89 @@ void ArdupilotInterface::set_reposition_callback(const std::shared_ptr<autopilot
     double desired_north = request->north;
     double desired_alt = request->altitude;
     RCLCPP_INFO(this->get_logger(), "New requested reposition East-North %.2f %.2f Alt. %.2f", desired_east, desired_north, desired_alt);
-    // Publish as local ENU setpoint (x=east, y=north, z=up relative to home).
-    // Avoids GPS altitude frame ambiguity of setpoint_position/global.
     for (int i = 0; i < REPOSITION_PUB_RETRIES; ++i) {
-        auto msg = geometry_msgs::msg::PoseStamped();
-        msg.header.stamp = this->get_clock()->now();
-        msg.header.frame_id = "map";
-        msg.pose.position.x = desired_east;
-        msg.pose.position.y = desired_north;
-        msg.pose.position.z = desired_alt;
-        msg.pose.orientation.w = 1.0; // Keep current yaw
-        setpoint_pos_pub_->publish(msg);
+        if (desired_alt < -1.0) {
+            // Velocity-only descent: GPS-independent to avoid horizontal drift from BiguaSim
+            // EKF GPS glitch that fires when crossing the water surface.
+            // MAVROS ENU→NED: velocity.z = -2.0 (ENU down) → NED vel.z = +2.0 m/s (descend).
+            auto msg = mavros_msgs::msg::PositionTarget();
+            msg.header.stamp = this->get_clock()->now();
+            msg.coordinate_frame = mavros_msgs::msg::PositionTarget::FRAME_LOCAL_NED;
+            msg.type_mask =
+                mavros_msgs::msg::PositionTarget::IGNORE_PX |
+                mavros_msgs::msg::PositionTarget::IGNORE_PY |
+                mavros_msgs::msg::PositionTarget::IGNORE_PZ |
+                mavros_msgs::msg::PositionTarget::IGNORE_AFX |
+                mavros_msgs::msg::PositionTarget::IGNORE_AFY |
+                mavros_msgs::msg::PositionTarget::IGNORE_AFZ |
+                mavros_msgs::msg::PositionTarget::IGNORE_YAW |
+                mavros_msgs::msg::PositionTarget::IGNORE_YAW_RATE;
+            msg.velocity.x = 0.0f;  // ENU east  = 0 → NED east  = 0
+            msg.velocity.y = 0.0f;  // ENU north = 0 → NED north = 0
+            msg.velocity.z = -2.0f; // ENU down  (negative = downward) → NED vel.z = +2 m/s
+            setpoint_raw_local_pub_->publish(msg);
+        } else if (desired_alt < 0.0) {
+            // Float at surface: vel.z = 0 tells ArduPilot to zero out vertical velocity.
+            // Buoyancy naturally brings the drone from just below the surface (~-0.12 m) up.
+            // Once above water, ArduPilot holds the drone hovering at surface level.
+            // Used with altitude in [-1, 0) — e.g. altitude = -0.5 in the mission YAML.
+            auto msg = mavros_msgs::msg::PositionTarget();
+            msg.header.stamp = this->get_clock()->now();
+            msg.coordinate_frame = mavros_msgs::msg::PositionTarget::FRAME_LOCAL_NED;
+            msg.type_mask =
+                mavros_msgs::msg::PositionTarget::IGNORE_PX |
+                mavros_msgs::msg::PositionTarget::IGNORE_PY |
+                mavros_msgs::msg::PositionTarget::IGNORE_PZ |
+                mavros_msgs::msg::PositionTarget::IGNORE_AFX |
+                mavros_msgs::msg::PositionTarget::IGNORE_AFY |
+                mavros_msgs::msg::PositionTarget::IGNORE_AFZ |
+                mavros_msgs::msg::PositionTarget::IGNORE_YAW |
+                mavros_msgs::msg::PositionTarget::IGNORE_YAW_RATE;
+            msg.velocity.x = 0.0f;
+            msg.velocity.y = 0.0f;
+            msg.velocity.z = 0.0f;
+            setpoint_raw_local_pub_->publish(msg);
+        } else if (desired_alt > 10.0) {
+            // GPS-free velocity mode: north/east/up velocities, no position loop.
+            // north/east inputs are reused as horizontal velocity (m/s); positive north = north.
+            // Used for: ascent from water (north=0, east=0) and dead-reckoning return (north<0).
+            // MAVROS ENU→NED: velocity.z = +2.0 (ENU up) → NED vel.z = -2.0 m/s (ascend).
+            auto msg = mavros_msgs::msg::PositionTarget();
+            msg.header.stamp = this->get_clock()->now();
+            msg.coordinate_frame = mavros_msgs::msg::PositionTarget::FRAME_LOCAL_NED;
+            msg.type_mask =
+                mavros_msgs::msg::PositionTarget::IGNORE_PX |
+                mavros_msgs::msg::PositionTarget::IGNORE_PY |
+                mavros_msgs::msg::PositionTarget::IGNORE_PZ |
+                mavros_msgs::msg::PositionTarget::IGNORE_AFX |
+                mavros_msgs::msg::PositionTarget::IGNORE_AFY |
+                mavros_msgs::msg::PositionTarget::IGNORE_AFZ |
+                mavros_msgs::msg::PositionTarget::IGNORE_YAW |
+                mavros_msgs::msg::PositionTarget::IGNORE_YAW_RATE;
+            msg.velocity.x = static_cast<float>(desired_east);   // ENU x = east velocity (m/s)
+            msg.velocity.y = static_cast<float>(desired_north);  // ENU y = north velocity (m/s)
+            msg.velocity.z = +2.0f; // ENU up → ascend 2 m/s (fixed)
+            setpoint_raw_local_pub_->publish(msg);
+        } else {
+            // Normal aerial navigation (0 ≤ alt ≤ 10 m): GPS global setpoint.
+            auto [des_lat, des_lon] = lat_lon_from_cartesian(home_lat_, home_lon_, desired_east, desired_north);
+            auto msg = mavros_msgs::msg::GlobalPositionTarget();
+            msg.header.stamp = this->get_clock()->now();
+            msg.coordinate_frame = mavros_msgs::msg::GlobalPositionTarget::FRAME_GLOBAL_REL_ALT;
+            msg.type_mask =
+                mavros_msgs::msg::GlobalPositionTarget::IGNORE_VX |
+                mavros_msgs::msg::GlobalPositionTarget::IGNORE_VY |
+                mavros_msgs::msg::GlobalPositionTarget::IGNORE_VZ |
+                mavros_msgs::msg::GlobalPositionTarget::IGNORE_AFX |
+                mavros_msgs::msg::GlobalPositionTarget::IGNORE_AFY |
+                mavros_msgs::msg::GlobalPositionTarget::IGNORE_AFZ |
+                mavros_msgs::msg::GlobalPositionTarget::IGNORE_YAW |
+                mavros_msgs::msg::GlobalPositionTarget::IGNORE_YAW_RATE;
+            msg.latitude  = des_lat;
+            msg.longitude = des_lon;
+            msg.altitude  = static_cast<float>(desired_alt);
+            setpoint_raw_global_pub_->publish(msg);
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(REPOSITION_REQ_DELAY_MS));
     }
     response->success = true;
@@ -428,39 +510,42 @@ void ArdupilotInterface::land_handle_accepted(const std::shared_ptr<rclcpp_actio
         if (mav_type_ == 2) { // Multicopter
             if (((current_fsm_state == ArdupilotInterfaceState::MC_HOVER) || (current_fsm_state == ArdupilotInterfaceState::MC_ORBIT))
                     && (current_time_us > (time_of_last_srv_req_us_ + ACTION_REQ_DELAY_SEC * 1000000))) {
-                auto set_param_request = std::make_shared<ParamSetV2::Request>();
-                set_param_request->param_id = "RTL_ALT"; // This is ineffective is the vehicle is already above this altitude
-                set_param_request->value.type = 2; // Integer
-                set_param_request->value.integer_value = static_cast<int64_t>(landing_altitude*100); // cm
+                // RTL_ALT param set skipped — not reliably available in ArduPilot SITL param cache.
                 time_of_last_srv_req_us_ = current_time_us;
-                call_service_and_update_fsm<ParamSetV2, autopilot_interface_msgs::action::Land>(
-                    set_param_client_, set_param_request, goal_handle,
-                    "Request param set", ArdupilotInterfaceState::MC_RTL_PARAM_SET);
+                std::unique_lock<std::shared_mutex> lock(node_data_mutex_);
+                aircraft_fsm_state_ = ArdupilotInterfaceState::MC_RTL_PARAM_SET;
             } else if ((current_fsm_state == ArdupilotInterfaceState::MC_RTL_PARAM_SET) && (current_time_us > (time_of_last_srv_req_us_ + ACTION_REQ_DELAY_SEC * 1000000))) {
                 auto set_mode_request = std::make_shared<SetMode::Request>();
-                set_mode_request->custom_mode = "RTL";
                 time_of_last_srv_req_us_ = current_time_us;
-                call_service_and_update_fsm<SetMode, autopilot_interface_msgs::action::Land>(
-                    set_mode_client_, set_mode_request, goal_handle,
-                    "Request mode", ArdupilotInterfaceState::MC_RTL);
-            } else if ((current_fsm_state == ArdupilotInterfaceState::MC_RTL) && (current_time_us > (time_of_last_srv_req_us_ + ACTION_REQ_DELAY_SEC * 1000000))) {
-                double distance_from_home_in_meters;
-                geod.Inverse(lat_, lon_, home_lat_, home_lon_, distance_from_home_in_meters);
-                if (distance_from_home_in_meters < MC_LAND_INIT_DIST_THRESH) {
-                    auto set_mode_request = std::make_shared<SetMode::Request>();
-                    set_mode_request->custom_mode = "GUIDED";
-                    time_of_last_srv_req_us_ = current_time_us;
+                if (landing_altitude < 0.0) {
+                    // Direct LAND: descend at current position, skip RTL navigation.
+                    // Use when GPS/EKF is unreliable and the drone is already over the target.
+                    set_mode_request->custom_mode = "LAND";
                     call_service_and_update_fsm<SetMode, autopilot_interface_msgs::action::Land>(
                         set_mode_client_, set_mode_request, goal_handle,
-                        "Request mode", ArdupilotInterfaceState::MC_RETURNED_READY_TO_LAND);
+                        "Request mode (direct LAND)", ArdupilotInterfaceState::MC_LANDING);
+                } else {
+                    set_mode_request->custom_mode = "RTL";
+                    call_service_and_update_fsm<SetMode, autopilot_interface_msgs::action::Land>(
+                        set_mode_client_, set_mode_request, goal_handle,
+                        "Request mode", ArdupilotInterfaceState::MC_RTL);
                 }
-            } else if ((current_fsm_state == ArdupilotInterfaceState::MC_RETURNED_READY_TO_LAND) && (current_time_us > (time_of_last_srv_req_us_ + ACTION_REQ_DELAY_SEC * 1000000))) {
-                auto landing_request = std::make_shared<CommandTOL::Request>();
-                time_of_last_srv_req_us_ = current_time_us;
-                call_service_and_update_fsm<CommandTOL, autopilot_interface_msgs::action::Land>(
-                    landing_client_, landing_request, goal_handle,
-                    "Request landing", ArdupilotInterfaceState::MC_LANDING);
-            } else if (current_fsm_state == ArdupilotInterfaceState::MC_LANDING && (std::abs(alt_ - home_alt_) < LAND_COMPLETED_ALT_THRESH)) {
+            } else if ((current_fsm_state == ArdupilotInterfaceState::MC_RTL) && (current_time_us > (time_of_last_srv_req_us_ + ACTION_REQ_DELAY_SEC * 1000000))) {
+                // Let ArduCopter RTL complete its full sequence (climb → return to home → land)
+                // without interruption. RTL auto-switches to LAND mode for the final descent,
+                // precisely over home. Intercept that transition to enter MC_LANDING.
+                std::string current_mode;
+                {
+                    std::shared_lock<std::shared_mutex> lock(node_data_mutex_);
+                    current_mode = ardupilot_mode_;
+                }
+                if (current_mode == "LAND") {
+                    time_of_last_srv_req_us_ = current_time_us;
+                    std::unique_lock<std::shared_mutex> lock(node_data_mutex_);
+                    aircraft_fsm_state_ = ArdupilotInterfaceState::MC_LANDING;
+                }
+            } else if (current_fsm_state == ArdupilotInterfaceState::MC_LANDING &&
+                       (landed_state_ == 1 || std::abs(alt_ - home_alt_) < LAND_COMPLETED_ALT_THRESH)) {
                 feedback->message = "MC landing completed";
                 goal_handle->publish_feedback(feedback);
                 std::unique_lock<std::shared_mutex> lock(node_data_mutex_); // Use unique_lock for data writes
@@ -545,7 +630,8 @@ void ArdupilotInterface::land_handle_accepted(const std::shared_ptr<rclcpp_actio
                 call_service_and_update_fsm<SetMode, autopilot_interface_msgs::action::Land>(
                     set_mode_client_, set_mode_request, goal_handle,
                     "Request mode", ArdupilotInterfaceState::VTOL_QRTL);
-            } else if ((current_fsm_state == ArdupilotInterfaceState::VTOL_QRTL) && (std::abs(alt_ - home_alt_) < LAND_COMPLETED_ALT_THRESH)) {
+            } else if ((current_fsm_state == ArdupilotInterfaceState::VTOL_QRTL) &&
+                       (landed_state_ == 1 || std::abs(alt_ - home_alt_) < LAND_COMPLETED_ALT_THRESH)) {
                 feedback->message = "VTOL QRTL completed";
                 goal_handle->publish_feedback(feedback);
                 std::unique_lock<std::shared_mutex> lock(node_data_mutex_); // Use unique_lock for data writes

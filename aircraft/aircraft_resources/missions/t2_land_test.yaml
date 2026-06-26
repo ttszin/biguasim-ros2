@@ -1,0 +1,83 @@
+steps:
+  # --- PHASE 1: Takeoff from platform ---
+  - action: takeoff
+    params:
+      takeoff_altitude: 5.0
+
+  # --- PHASE 2: Fly to above water ---
+  - action: go_to_known_gps_waypoint
+    params:
+      north: 17.0
+      east: 0.0
+      altitude: 5.0
+
+  - action: wait
+    params:
+      duration: 20.0
+
+  # --- PHASE 3: Descend to water ---
+  # GPS-free descent. Stops automatically when AQUATIC_NAV fires.
+  - action: descend_to_water
+    params:
+      timeout: 180.0
+
+  # Detect land_complete on water.
+  # Expected log: "Land complete ... Surface: water."
+  - action: wait_for_land_complete
+    params:
+      timeout: 15.0
+
+  # --- PHASE 4: Ascend back ---
+  # GPS-free ascent at 2 m/s. Stops automatically when AERIAL_NAV fires.
+  # Command is re-sent every 10s to keep GUID_TIMEOUT alive.
+  - action: ascend_from_water
+    params:
+      timeout: 120.0
+
+  # --- PHASE 4b: Ascend above bridge deck ---
+  # Keeps sending vel.z=+2 every 10s until alt_msl >= 575.0 (bridge at 570.66 MSL).
+  # No fixed wait: advances only when the drone actually reaches the target altitude.
+  - action: ascend_to_altitude
+    params:
+      altitude_msl: 582.0
+      timeout: 0
+
+  # --- PHASE 5: Return to platform ---
+  # GPS position mode: target = 17m south of home (EKF north=0), alt=5m above home (575.66 MSL).
+  # EKF glitch → ArduPilot thinks it is at north=0; navigates 17m south →
+  # physical north=17 (water) → physical north=0 (platform).
+  - action: go_to_known_gps_waypoint
+    params:
+      north: -17.0
+      east: 0.0
+      altitude: 5.0
+
+  # Advances only when EKF lat/lon reaches north ≈ -17m (±2m).
+  - action: wait_to_reach_position
+    params:
+      north: -17.0
+      threshold: 2.0
+      timeout: 180.0
+
+  # Let the drone fully stop at the GPS target before triggering LAND.
+  # wait_to_reach_position fires ~1.8m before target (threshold=2m).
+  # 8s gives the drone time to cover the remaining distance and decelerate to hover.
+  # Without this wait, LAND mode is activated with residual southward velocity
+  # and the drone overshoots the deck into the bridge gap.
+  - action: wait
+    params:
+      duration: 8.0
+
+  # --- PHASE 6: Land on platform (direct LAND mode, no RTL) ---
+  # landing_altitude < 0 → direct LAND mode: descend at current position.
+  # RTL would navigate away (EKF position drifted to north=-17 after south maneuver).
+  - action: land
+    params:
+      landing_altitude: -1.0
+      vtol_transition_heading: 0.0
+
+  # Detect land_complete on platform.
+  # Expected log: "Land complete ... Surface: platform."
+  - action: wait_for_land_complete
+    params:
+      timeout: 60.0

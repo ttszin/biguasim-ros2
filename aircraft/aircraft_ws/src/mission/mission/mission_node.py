@@ -15,7 +15,8 @@ import yaml
 from action_msgs.msg import GoalStatus
 from sensor_msgs.msg import NavSatFix
 from std_msgs.msg import String
-from mavros_msgs.msg import VfrHud
+from mavros_msgs.msg import VfrHud, ExtendedState
+from geometry_msgs.msg import Point
 from vision_msgs.msg import Detection2DArray
 try:
     from px4_msgs.msg import VehicleGlobalPosition, AirspeedValidated
@@ -83,6 +84,52 @@ class MissionNode(Node):
         self.nav_mode_wait_target = None
         self.nav_mode_wait_start = None
         self.nav_mode_wait_timeout = 30.0
+        # Bool topic wait (e.g. /bluerov0/tour_done)
+        self.bool_topic_wait_topic = None
+        self.bool_topic_wait_start = None
+        self.bool_topic_wait_timeout = 300.0
+        self.bool_topic_wait_flag = False
+        # Land-complete detection
+        self.landed_state = 0  # ExtendedState: 0=UNDEFINED, 1=ON_GROUND, 2=IN_AIR, 3=TAKEOFF, 4=LANDING
+        self.land_complete_waiting = False
+        self.land_complete_start = None
+        self.land_complete_timeout = 60.0
+        self.landing_surface = None  # 'platform' or 'water', set when land_complete fires
+        # Altitude-stability fallback: fires when alt_msl is stable for 3s (ArduPilot land detector
+        # may not fire in BiguaSim when landing on a rigid platform in direct LAND mode).
+        self.land_alt_prev = None
+        self.land_alt_stable_start = None
+        # descend_to_water: vel.z=-2 m/s (GPS-free) until AQUATIC_NAV, then auto-float
+        self.descend_to_water_active = False
+        self.descend_to_water_start = None
+        self.descend_to_water_timeout = 180.0
+        # ascend_from_water: vel.z=+2 m/s (GPS-free) until AERIAL_NAV, refreshed every 10s
+        self.ascend_from_water_active = False
+        self.ascend_from_water_start = None
+        self.ascend_from_water_timeout = 120.0
+        self.ascend_from_water_last_send = None
+        # ascend_to_altitude: vel.z=+2 m/s until alt_msl >= target, refreshed every 10s
+        self.ascend_to_alt_active = False
+        self.ascend_to_alt_target_msl = 0.0
+        self.ascend_to_alt_start = None
+        self.ascend_to_alt_timeout = 120.0
+        self.ascend_to_alt_last_send = None
+        # wait_to_reach_position: advance when EKF lat/lon is within threshold of target north/east
+        self.reach_position_active = False
+        self.reach_position_target_north = 0.0
+        self.reach_position_threshold = 3.0
+        self.reach_position_start = None
+        self.reach_position_timeout = 60.0
+        # home position — captured on first GPS fix, used for north/east distance calculations
+        self.home_lat = None
+        self.home_lon = None
+        # ROV waypoint tracking
+        self.rov_position = None
+        self.rov_waypoint_waiting = False
+        self.rov_waypoint_target = None
+        self.rov_waypoint_threshold = 1.5
+        self.rov_waypoint_timeout = 120.0
+        self.rov_waypoint_start = None
 
         # Create a reentrant callback groups to allow callbacks to run in parallel
         self.subscriber_callback_group = ReentrantCallbackGroup()
@@ -118,6 +165,20 @@ class MissionNode(Node):
         self.create_subscription(
             String, '/nav_mode', self.nav_mode_callback,
             10, callback_group=self.subscriber_callback_group)
+        # ArduPilot land_complete signal
+        self.create_subscription(
+            ExtendedState, '/mavros/extended_state', self.extended_state_callback,
+            10, callback_group=self.subscriber_callback_group)
+        # ROV tour completion
+        from std_msgs.msg import Bool as BoolMsg
+        self.create_subscription(
+            BoolMsg, '/bluerov0/tour_done', self._tour_done_cb,
+            10, callback_group=self.subscriber_callback_group)
+        # ROV position feedback and command publisher
+        self.create_subscription(
+            Point, '/bluerov0/local_position', self._rov_pos_cb,
+            10, callback_group=self.subscriber_callback_group)
+        self._rov_cmd_pub = self.create_publisher(Point, '/bluerov0/cmd_pos_yaw', 10)
         # self.create_subscription( # 1Hz
         #     SwarmObs, '/tracks', self.ground_tracks_callback,
         #     self.qos_profile, callback_group=self.subscriber_callback_group)
@@ -186,6 +247,9 @@ class MissionNode(Node):
         with self.data_lock:
             self.lat = msg.latitude
             self.lon = msg.longitude
+            if self.home_lat is None:
+                self.home_lat = msg.latitude
+                self.home_lon = msg.longitude
 
     def vfr_hud_callback(self, msg): # Mutally exclusive with airspeed_validated_callback
         with self.data_lock:
@@ -200,6 +264,36 @@ class MissionNode(Node):
     def nav_mode_callback(self, msg):
         with self.data_lock:
             self.current_nav_mode = msg.data
+        # React in subscriber (not timer) so there is zero polling delay.
+        if self.descend_to_water_active and msg.data == 'AQUATIC_NAV':
+            req = SetReposition.Request()
+            req.north = 0.0
+            req.east = 0.0
+            req.altitude = -0.5  # triggers vel.z=0 (float at surface)
+            # Use no-advance variant: mission_step must not be incremented by service_response_callback
+            self._call_service_no_advance(self._reposition_client, req)
+            self.descend_to_water_active = False
+            self.descend_to_water_start = None
+            self.get_logger().info("descend_to_water: AQUATIC_NAV detected, switched to float.")
+            self.mission_step += 1
+        elif self.ascend_from_water_active and msg.data == 'AERIAL_NAV':
+            self.ascend_from_water_active = False
+            self.ascend_from_water_start = None
+            self.get_logger().info("ascend_from_water: AERIAL_NAV detected, ascent complete.")
+            self.mission_step += 1
+
+    def extended_state_callback(self, msg):
+        with self.data_lock:
+            self.landed_state = msg.landed_state
+
+    def _tour_done_cb(self, msg):
+        if msg.data:
+            with self.data_lock:
+                self.bool_topic_wait_flag = True
+
+    def _rov_pos_cb(self, msg):
+        with self.data_lock:
+            self.rov_position = (msg.x, msg.y, msg.z)
 
     def discover_drones_callback(self):
         topic_prefix = '/state_sharing_drone_'
@@ -341,6 +435,22 @@ class MissionNode(Node):
         future = server.call_async(request)
         future.add_done_callback(self.service_response_callback)
 
+    def _call_service_no_advance(self, server, request):
+        """Send a service request without auto-advancing mission_step."""
+        if server is None or not server.wait_for_service(timeout_sec=1.0):
+            self.get_logger().error('Service not available.')
+            return
+        future = server.call_async(request)
+        future.add_done_callback(self._service_no_advance_callback)
+
+    def _service_no_advance_callback(self, future):
+        try:
+            response = future.result()
+            if not response.success:
+                self.get_logger().error(f"Service call failed (no-advance): {response.message}")
+        except Exception as e:
+            self.get_logger().error(f'Service call failed (no-advance): {e}')
+
     def service_response_callback(self, future):
         try:
             response = future.result()
@@ -359,6 +469,44 @@ class MissionNode(Node):
         if self.active_mission_goal_handle is not None:
             return
 
+        # If waiting for a bool topic (e.g. tour_done)
+        if self.bool_topic_wait_topic is not None:
+            with self.data_lock:
+                flag = self.bool_topic_wait_flag
+            if flag:
+                self.get_logger().info(f"Bool topic '{self.bool_topic_wait_topic}' received True.")
+                self.bool_topic_wait_topic = None
+                self.bool_topic_wait_flag = False
+                self.mission_step += 1
+            else:
+                elapsed = (self.get_clock().now() - self.bool_topic_wait_start).nanoseconds / 1e9
+                if elapsed > self.bool_topic_wait_timeout:
+                    self.get_logger().error(f"Timeout waiting for '{self.bool_topic_wait_topic}'.")
+                    self.mission_step = -1
+                    self.bool_topic_wait_topic = None
+            return
+
+        # If waiting for the ROV to reach a waypoint
+        if self.rov_waypoint_waiting:
+            with self.data_lock:
+                pos = self.rov_position
+                target = self.rov_waypoint_target
+                threshold = self.rov_waypoint_threshold
+            if pos is not None and target is not None:
+                dist = ((pos[0]-target[0])**2 + (pos[1]-target[1])**2 + (pos[2]-target[2])**2)**0.5
+                if dist < threshold:
+                    self.get_logger().info(f"ROV reached waypoint (dist={dist:.2f} m)")
+                    self.rov_waypoint_waiting = False
+                    self.rov_waypoint_target = None
+                    self.mission_step += 1
+                    return
+            elapsed = (self.get_clock().now() - self.rov_waypoint_start).nanoseconds / 1e9
+            if elapsed > self.rov_waypoint_timeout:
+                self.get_logger().error("Timeout waiting for ROV waypoint.")
+                self.mission_step = -1
+                self.rov_waypoint_waiting = False
+            return
+
         # If waiting for a nav mode transition, poll current mode
         if self.nav_mode_wait_target is not None:
             with self.data_lock:
@@ -375,6 +523,140 @@ class MissionNode(Node):
                         f"Timeout waiting for nav mode '{self.nav_mode_wait_target}'.")
                     self.mission_step = -1
                     self.nav_mode_wait_target = None
+            return
+
+        # If waiting for land_complete (ExtendedState.landed_state == ON_GROUND)
+        if self.land_complete_waiting:
+            with self.data_lock:
+                ls = self.landed_state
+                nav_mode = self.current_nav_mode
+                current_alt = self.alt_msl
+            if ls == 1:  # LANDED_STATE_ON_GROUND (physical touchdown, platform or rigid surface)
+                surface = 'water' if nav_mode == 'AQUATIC_NAV' else 'platform'
+                self.landing_surface = surface
+                self.land_complete_waiting = False
+                self.land_alt_prev = None
+                self.land_alt_stable_start = None
+                self.get_logger().info(f"Land complete (ON_GROUND). Surface: {surface}.")
+                self.mission_step += 1
+            elif nav_mode == 'AQUATIC_NAV':  # floating on water surface (buoyancy prevents ON_GROUND)
+                self.landing_surface = 'water'
+                self.land_complete_waiting = False
+                self.land_alt_prev = None
+                self.land_alt_stable_start = None
+                self.get_logger().info("Land complete (AQUATIC_NAV surface). Surface: water.")
+                self.mission_step += 1
+            else:
+                # Fallback: detect landing via altitude stability.
+                # ArduPilot land detector may not fire in BiguaSim on rigid platforms.
+                if current_alt is not None:
+                    if self.land_alt_stable_start is None:
+                        self.land_alt_stable_start = self.get_clock().now()
+                        self.land_alt_prev = current_alt
+                    elif abs(current_alt - self.land_alt_prev) >= 0.1:
+                        # Cumulative drift from window-start reference exceeds threshold — reset.
+                        # Comparing against the window-start ref (not adjacent samples) catches
+                        # slow descents where each 1-second step is individually < 0.1 m.
+                        self.land_alt_stable_start = self.get_clock().now()
+                        self.land_alt_prev = current_alt
+                    stable_elapsed = (self.get_clock().now() - self.land_alt_stable_start).nanoseconds / 1e9
+                    if stable_elapsed >= 3.0:
+                        surface = 'platform'
+                        self.landing_surface = surface
+                        self.land_complete_waiting = False
+                        self.land_alt_prev = None
+                        self.land_alt_stable_start = None
+                        self.get_logger().info(
+                            f"Land complete (alt stable at {current_alt:.1f} MSL). Surface: {surface}.")
+                        self.mission_step += 1
+                        return
+                elapsed = (self.get_clock().now() - self.land_complete_start).nanoseconds / 1e9
+                if elapsed > self.land_complete_timeout:
+                    self.get_logger().error("Timeout waiting for land_complete.")
+                    self.mission_step = -1
+                    self.land_complete_waiting = False
+            return
+
+        # descend_to_water: float setpoint + mission_step advance happen in nav_mode_callback.
+        # This block only handles timeout.
+        if self.descend_to_water_active:
+            elapsed = (self.get_clock().now() - self.descend_to_water_start).nanoseconds / 1e9
+            if elapsed > self.descend_to_water_timeout:
+                self.get_logger().error("Timeout waiting for AQUATIC_NAV in descend_to_water.")
+                self.descend_to_water_active = False
+                self.descend_to_water_start = None
+                self.mission_step = -1
+            return
+
+        # ascend_from_water: re-send vel.z=+2 every 10s to keep GUID_TIMEOUT alive.
+        # mission_step advance happens in nav_mode_callback when AERIAL_NAV fires.
+        if self.ascend_from_water_active:
+            elapsed = (self.get_clock().now() - self.ascend_from_water_start).nanoseconds / 1e9
+            if elapsed > self.ascend_from_water_timeout:
+                self.get_logger().error("Timeout waiting for AERIAL_NAV in ascend_from_water.")
+                self.ascend_from_water_active = False
+                self.ascend_from_water_start = None
+                self.mission_step = -1
+                return
+            last_send_elapsed = (self.get_clock().now() - self.ascend_from_water_last_send).nanoseconds / 1e9
+            if last_send_elapsed >= 10.0:
+                req = SetReposition.Request()
+                req.north = 0.0
+                req.east = 0.0
+                req.altitude = 15.0  # > 10 → vel.z = +2 m/s (GPS-free ascent)
+                self._call_service_no_advance(self._reposition_client, req)
+                self.ascend_from_water_last_send = self.get_clock().now()
+                self.get_logger().info("ascend_from_water: re-sending ascent command.")
+            return
+
+        if self.ascend_to_alt_active:
+            with self.data_lock:
+                current_alt = self.alt_msl
+            if current_alt is not None and current_alt >= self.ascend_to_alt_target_msl:
+                self.ascend_to_alt_active = False
+                self.get_logger().info(
+                    f"ascend_to_altitude: reached {current_alt:.1f} MSL (target {self.ascend_to_alt_target_msl:.1f}).")
+                self.mission_step += 1
+                return
+            if self.ascend_to_alt_timeout > 0:
+                elapsed = (self.get_clock().now() - self.ascend_to_alt_start).nanoseconds / 1e9
+                if elapsed > self.ascend_to_alt_timeout:
+                    self.get_logger().error("Timeout in ascend_to_altitude.")
+                    self.ascend_to_alt_active = False
+                    self.mission_step = -1
+                    return
+            last_send_elapsed = (self.get_clock().now() - self.ascend_to_alt_last_send).nanoseconds / 1e9
+            if last_send_elapsed >= 10.0:
+                req = SetReposition.Request()
+                req.north = 0.0
+                req.east = 0.0
+                req.altitude = 15.0
+                self._call_service_no_advance(self._reposition_client, req)
+                self.ascend_to_alt_last_send = self.get_clock().now()
+                alt_str = f"{current_alt:.1f}" if current_alt is not None else "N/A"
+                self.get_logger().info(
+                    f"ascend_to_altitude: re-sending vel.z+2 (alt={alt_str} MSL, target={self.ascend_to_alt_target_msl:.1f}).")
+            return
+
+        if self.reach_position_active:
+            with self.data_lock:
+                lat = self.lat
+                home_lat = self.home_lat
+            if lat is not None and home_lat is not None:
+                current_north = (lat - home_lat) * 111320.0
+                dist_to_target = abs(current_north - self.reach_position_target_north)
+                if dist_to_target < self.reach_position_threshold:
+                    self.get_logger().info(
+                        f"wait_to_reach_position: arrived — north≈{current_north:.1f}m "
+                        f"(target={self.reach_position_target_north:.1f}m, err={dist_to_target:.1f}m).")
+                    self.reach_position_active = False
+                    self.mission_step += 1
+                    return
+            elapsed = (self.get_clock().now() - self.reach_position_start).nanoseconds / 1e9
+            if elapsed > self.reach_position_timeout:
+                self.get_logger().error("Timeout in wait_to_reach_position.")
+                self.reach_position_active = False
+                self.mission_step = -1
             return
 
         # If a "Wait" is active, check time: if still waiting, return. If done, clear wait and proceed
@@ -467,6 +749,113 @@ class MissionNode(Node):
             req.speed = float(params.get('speed', 15.0))
             self.call_service(self._speed_client, req)
 
+        elif action_type == 'move_rov':
+            x = float(params.get('x', 25.0))
+            y = float(params.get('y', 0.0))
+            z = float(params.get('z', -0.5))
+            threshold = float(params.get('threshold', 1.5))
+            timeout = float(params.get('timeout', 120.0))
+            cmd = Point()
+            cmd.x = x
+            cmd.y = y
+            cmd.z = z
+            self._rov_cmd_pub.publish(cmd)
+            self.get_logger().info(f"ROV waypoint → ({x:.1f}, {y:.1f}, {z:.1f}), threshold={threshold}m")
+            with self.data_lock:
+                self.rov_waypoint_target = (x, y, z)
+                self.rov_waypoint_threshold = threshold
+                self.rov_waypoint_timeout = timeout
+                self.rov_waypoint_start = self.get_clock().now()
+                self.rov_waypoint_waiting = True
+
+        elif action_type == 'wait_for_bool_topic':
+            topic = str(params.get('topic', '/bluerov0/tour_done'))
+            timeout = float(params.get('timeout', 300.0))
+            with self.data_lock:
+                flag = self.bool_topic_wait_flag
+            if flag:
+                self.get_logger().info(f"Bool topic '{topic}' already True.")
+                self.bool_topic_wait_flag = False
+                self.mission_step += 1
+                return
+            self.get_logger().info(f"Waiting for '{topic}' (timeout={timeout}s)...")
+            self.bool_topic_wait_topic = topic
+            self.bool_topic_wait_start = self.get_clock().now()
+            self.bool_topic_wait_timeout = timeout
+
+        elif action_type == 'descend_to_water':
+            timeout = float(params.get('timeout', 180.0))
+            req = SetReposition.Request()
+            req.north = 0.0
+            req.east = 0.0
+            req.altitude = -10.0  # altitude < -1 → vel.z=-2 m/s, GPS-free descent
+            # Use no-advance: mission_step is advanced by nav_mode_callback when AQUATIC_NAV fires,
+            # not by service_response_callback (which would cause a double-increment).
+            self._call_service_no_advance(self._reposition_client, req)
+            self.descend_to_water_active = True
+            self.descend_to_water_start = self.get_clock().now()
+            self.descend_to_water_timeout = timeout
+            self.get_logger().info(f"descend_to_water: descending at 2 m/s until AQUATIC_NAV (timeout={timeout}s).")
+
+        elif action_type == 'ascend_from_water':
+            timeout = float(params.get('timeout', 120.0))
+            req = SetReposition.Request()
+            req.north = 0.0
+            req.east = 0.0
+            req.altitude = 15.0  # > 10 → vel.z = +2 m/s, GPS-free ascent
+            self._call_service_no_advance(self._reposition_client, req)
+            self.ascend_from_water_active = True
+            self.ascend_from_water_start = self.get_clock().now()
+            self.ascend_from_water_timeout = timeout
+            self.ascend_from_water_last_send = self.get_clock().now()
+            self.get_logger().info(f"ascend_from_water: ascending at 2 m/s until AERIAL_NAV (timeout={timeout}s).")
+
+        elif action_type == 'ascend_to_altitude':
+            target_msl = float(params.get('altitude_msl', 575.0))
+            timeout = float(params.get('timeout', 120.0))
+            with self.data_lock:
+                current_alt = self.alt_msl
+            if current_alt is not None and current_alt >= target_msl:
+                self.get_logger().info(f"ascend_to_altitude: already at {current_alt:.1f} MSL.")
+                self.mission_step += 1
+                return
+            req = SetReposition.Request()
+            req.north = 0.0
+            req.east = 0.0
+            req.altitude = 15.0
+            self._call_service_no_advance(self._reposition_client, req)
+            self.ascend_to_alt_active = True
+            self.ascend_to_alt_target_msl = target_msl
+            self.ascend_to_alt_start = self.get_clock().now()
+            self.ascend_to_alt_timeout = timeout
+            self.ascend_to_alt_last_send = self.get_clock().now()
+            alt_str = f"{current_alt:.1f}" if current_alt is not None else "N/A"
+            self.get_logger().info(
+                f"ascend_to_altitude: ascending to {target_msl:.1f} MSL (current {alt_str}).")
+
+        elif action_type == 'wait_to_reach_position':
+            target_north = float(params.get('north', 0.0))
+            threshold = float(params.get('threshold', 3.0))
+            timeout = float(params.get('timeout', 60.0))
+            with self.data_lock:
+                lat = self.lat
+                home_lat = self.home_lat
+            if lat is not None and home_lat is not None:
+                current_north = (lat - home_lat) * 111320.0
+                if abs(current_north - target_north) < threshold:
+                    self.get_logger().info(
+                        f"wait_to_reach_position: already at north≈{current_north:.1f}m.")
+                    self.mission_step += 1
+                    return
+            self.reach_position_active = True
+            self.reach_position_target_north = target_north
+            self.reach_position_threshold = threshold
+            self.reach_position_start = self.get_clock().now()
+            self.reach_position_timeout = timeout
+            self.get_logger().info(
+                f"wait_to_reach_position: waiting for north={target_north:.1f}m "
+                f"(threshold={threshold:.1f}m, timeout={timeout:.0f}s).")
+
         elif action_type == 'wait_for_nav_mode':
             target_mode = str(params.get('mode', 'AERIAL_NAV'))
             timeout = float(params.get('timeout', 30.0))
@@ -480,6 +869,29 @@ class MissionNode(Node):
             self.nav_mode_wait_target = target_mode
             self.nav_mode_wait_start = self.get_clock().now()
             self.nav_mode_wait_timeout = timeout
+
+        elif action_type == 'wait_for_land_complete':
+            timeout = float(params.get('timeout', 60.0))
+            with self.data_lock:
+                ls = self.landed_state
+                nav_mode = self.current_nav_mode
+            if ls == 1:  # already on ground (platform or rigid surface)
+                surface = 'water' if nav_mode == 'AQUATIC_NAV' else 'platform'
+                self.landing_surface = surface
+                self.get_logger().info(f"Land complete (already ON_GROUND). Surface: {surface}.")
+                self.mission_step += 1
+                return
+            if nav_mode == 'AQUATIC_NAV':  # already floating on water surface
+                self.landing_surface = 'water'
+                self.get_logger().info("Land complete (already AQUATIC_NAV). Surface: water.")
+                self.mission_step += 1
+                return
+            self.get_logger().info(f"Waiting for land_complete signal (timeout={timeout}s)...")
+            self.land_complete_waiting = True
+            self.land_complete_start = self.get_clock().now()
+            self.land_complete_timeout = timeout
+            self.land_alt_prev = None
+            self.land_alt_stable_start = None
 
         else:
             self.get_logger().error(f"Unknown action: {action_type}")

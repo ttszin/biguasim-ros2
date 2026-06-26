@@ -23,6 +23,9 @@
 #include <geographic_msgs/msg/geo_pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 
+#include <mavros_msgs/msg/global_position_target.hpp>
+#include <mavros_msgs/msg/position_target.hpp>
+#include <mavros_msgs/msg/extended_state.hpp>
 #include <mavros_msgs/msg/home_position.hpp>
 #include <mavros_msgs/msg/state.hpp>
 #include <mavros_msgs/msg/vehicle_info.hpp>
@@ -156,6 +159,7 @@ private:
     rclcpp::Subscription<VfrHud>::SharedPtr mavros_vfr_hud_sub_;
     rclcpp::Subscription<HomePosition>::SharedPtr mavros_home_position_home_sub_;
     rclcpp::Subscription<State>::SharedPtr mavros_state_sub_;
+    rclcpp::Subscription<mavros_msgs::msg::ExtendedState>::SharedPtr mavros_extended_state_sub_;
 
     // MAVROS service clients
     rclcpp::Client<VehicleInfoGet>::SharedPtr vehicle_info_client_;
@@ -172,6 +176,7 @@ private:
     int target_system_id_, mav_state_, mav_type_;
     bool armed_flag_;
     std::string ardupilot_mode_;
+    uint8_t landed_state_; // mavros_msgs/ExtendedState: 0=UNDEFINED, 1=ON_GROUND, 2=IN_AIR, 3=TAKEOFF, 4=LANDING
     double lat_, lon_, alt_, alt_ellipsoid_;
     double x_, y_, z_, vx_, vy_, vz_;
     double ref_lat_, ref_lon_, ref_alt_;
@@ -183,6 +188,8 @@ private:
 
     // MAVROS publishers
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr setpoint_pos_pub_;
+    rclcpp::Publisher<mavros_msgs::msg::GlobalPositionTarget>::SharedPtr setpoint_raw_global_pub_;
+    rclcpp::Publisher<mavros_msgs::msg::PositionTarget>::SharedPtr setpoint_raw_local_pub_;
 
     // Offboard flag publisher
     rclcpp::Publisher<autopilot_interface_msgs::msg::OffboardFlag>::SharedPtr offboard_flag_pub_;
@@ -208,6 +215,7 @@ private:
     void vfr_hud_callback(const VfrHud::SharedPtr msg);
     void home_position_home_callback(const HomePosition::SharedPtr msg);
     void state_callback(const State::SharedPtr msg);
+    void extended_state_callback(const mavros_msgs::msg::ExtendedState::SharedPtr msg);
 
     // Callbacks for non-blocking services
     void set_speed_callback(const std::shared_ptr<autopilot_interface_msgs::srv::SetSpeed::Request> request,

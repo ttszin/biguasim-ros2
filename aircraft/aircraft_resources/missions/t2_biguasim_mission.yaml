@@ -3,45 +3,86 @@ steps:
     params:
       takeoff_altitude: 5.0
 
-  # Fly to position above the river in the Bridge world.
-  # north=17m east=0m: water at Biguasim x=25,y=0 relative to spawn x=8,y=0
   - action: go_to_known_gps_waypoint
     params:
-      north: 20.0
+      north: 17.0
       east: 0.0
       altitude: 5.0
 
-  # Descend into the water.
-  # home_alt ≈ 13.4m (spawn z in Biguasim). Water surface at world z≈0.
-  # altitude = world_z_target - home_alt → -15 puts drone at world z≈-1.6m (inside water).
+  - action: wait
+    params:
+      duration: 20.0
+
+  # Velocity-only descent (altitude < -1 → vel.z = -2 m/s).
   - action: go_to_known_gps_waypoint
     params:
-      north: 20.0
+      north: 17.0
       east: 0.0
-      altitude: -15.0
+      altitude: -10.0
 
-  # Block until biguasim_bridge_runner + validador_t2 confirm AQUATIC_NAV.
+  # Block until pressure sensor confirms AQUATIC_NAV.
+  # Debounce reduced to 0.5 s so this fires at bsim_z ≈ -1 m (not -3 m).
   - action: wait_for_nav_mode
     params:
       mode: AQUATIC_NAV
-      timeout: 60.0
+      timeout: 180.0
 
-  - action: wait
+  # Float at surface: altitude in [-1, 0) → vel.z = 0.
+  # Overrides the descent command; buoyancy brings drone back up slowly.
+  - action: go_to_known_gps_waypoint
     params:
-      duration: 5.0
+      north: 17.0
+      east: 0.0
+      altitude: -0.5
 
-  # Ascend out of the water
+  # ROV tour — mission sends waypoints and waits for the ROV to arrive at each.
+  # Coordinates are BiguaSim NWU world-frame (x=North, y=West, z=Up).
+  # ROV starts at [25, 0, -0.5]; the drone hovers at x=25 when it dives.
+
+  - action: move_rov
+    params:
+      x: 25.0
+      y: 3.0
+      z: -1.0
+      threshold: 1.5
+      timeout: 90.0
+
+  - action: move_rov
+    params:
+      x: 28.0
+      y: 3.0
+      z: -1.0
+      threshold: 1.5
+      timeout: 90.0
+
+  - action: move_rov
+    params:
+      x: 28.0
+      y: -3.0
+      z: -1.0
+      threshold: 1.5
+      timeout: 120.0
+
+  - action: move_rov
+    params:
+      x: 25.0
+      y: 0.0
+      z: -0.5
+      threshold: 1.5
+      timeout: 120.0
+
+  # Ascend to aerial altitude (altitude > 10 → vel.z = +2 m/s).
   - action: go_to_known_gps_waypoint
     params:
       north: 20.0
       east: 0.0
       altitude: 15.0
 
-  # Block until sensor confirms AERIAL_NAV (pressure back to atmospheric)
+  # AERIAL_NAV should already be active from surfacing; this returns immediately.
   - action: wait_for_nav_mode
     params:
       mode: AERIAL_NAV
-      timeout: 60.0
+      timeout: 120.0
 
   - action: wait
     params:
@@ -51,3 +92,8 @@ steps:
     params:
       landing_altitude: 0.0
       vtol_transition_heading: 0.0
+
+  # Block until ArduPilot reports LANDED_STATE_ON_GROUND; determines water vs platform.
+  - action: wait_for_land_complete
+    params:
+      timeout: 60.0
