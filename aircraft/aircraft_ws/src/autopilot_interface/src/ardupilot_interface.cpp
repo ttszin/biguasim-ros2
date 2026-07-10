@@ -382,8 +382,10 @@ void ArdupilotInterface::set_reposition_callback(const std::shared_ptr<autopilot
             setpoint_raw_local_pub_->publish(msg);
         } else if (desired_alt < 0.0) {
             // Float at surface: vel.z = 0 tells ArduPilot to zero out vertical velocity.
-            // Buoyancy naturally brings the drone from just below the surface (~-0.12 m) up.
-            // Once above water, ArduPilot holds the drone hovering at surface level.
+            // The DjiMatrice hull has no Archimedes force in BiguaSim — it stabilizes near
+            // the surface because SkyDive/Bridge's fluid collision stops it from sinking
+            // further, combined with this zeroed vertical velocity command (simulated
+            // buoyancy via active control, not real hydrostatic physics).
             // Used with altitude in [-1, 0) — e.g. altitude = -0.5 in the mission YAML.
             auto msg = mavros_msgs::msg::PositionTarget();
             msg.header.stamp = this->get_clock()->now();
@@ -1007,6 +1009,7 @@ void ArdupilotInterface::takeoff_handle_accepted(const std::shared_ptr<rclcpp_ac
 
     bool taking_off = true;
     uint64_t time_of_last_srv_req_us_ = this->get_clock()->now().nanoseconds() / 1000;  // Convert to microseconds
+    uint64_t alt_reached_since_us = 0; // 0 means "not currently above threshold"; MC takeoff debounce
     ArdupilotInterfaceState current_fsm_state;
     rclcpp::Rate takeoff_loop_rate(ACTION_LOOP_RATE_HZ);
     while (taking_off) {
@@ -1030,12 +1033,36 @@ void ArdupilotInterface::takeoff_handle_accepted(const std::shared_ptr<rclcpp_ac
 
         if (mav_type_ == 2) { // Multicopter
             if ((current_fsm_state == ArdupilotInterfaceState::STARTED) && (current_time_us > (time_of_last_srv_req_us_ + ACTION_REQ_DELAY_SEC * 1000000))) {
-                auto set_mode_request = std::make_shared<SetMode::Request>();
-                set_mode_request->custom_mode = "GUIDED";
-                time_of_last_srv_req_us_ = current_time_us;
-                call_service_and_update_fsm<SetMode, autopilot_interface_msgs::action::Takeoff>(
-                    set_mode_client_, set_mode_request, goal_handle,
-                    "Request mode", ArdupilotInterfaceState::GUIDED_PRETAKEOFF);
+                // home_lat_/home_lon_/home_alt_ were saved in takeoff_handle_goal, but
+                // /mavros/global_position/global may not have published a real fix yet at
+                // that instant (its first message can be an all-zero placeholder before
+                // GPS lock). Re-validate here and keep retrying until lat_/lon_/alt_ look
+                // real, otherwise MC_TAKEOFF_COMPLETED_RATIO check below would compare
+                // against a bogus home_alt_ (e.g. 0.0) and report completion instantly.
+                bool home_valid = !(std::isnan(home_alt_) ||
+                    (std::abs(home_lat_) < 1e-6 && std::abs(home_lon_) < 1e-6));
+                if (!home_valid) {
+                    time_of_last_srv_req_us_ = current_time_us;
+                    bool position_valid = !(std::isnan(lat_) || std::isnan(lon_) || std::isnan(alt_) ||
+                        (std::abs(lat_) < 1e-6 && std::abs(lon_) < 1e-6));
+                    if (position_valid) {
+                        std::unique_lock<std::shared_mutex> lock(node_data_mutex_);
+                        home_lat_ = lat_;
+                        home_lon_ = lon_;
+                        home_alt_ = alt_;
+                        RCLCPP_WARN(this->get_logger(), "Home position re-validated: lat_ %.5f lon_ %.5f alt_ %.2f",
+                            home_lat_, home_lon_, home_alt_);
+                    } else {
+                        RCLCPP_WARN(this->get_logger(), "Waiting for a valid global position before starting takeoff...");
+                    }
+                } else {
+                    auto set_mode_request = std::make_shared<SetMode::Request>();
+                    set_mode_request->custom_mode = "GUIDED";
+                    time_of_last_srv_req_us_ = current_time_us;
+                    call_service_and_update_fsm<SetMode, autopilot_interface_msgs::action::Takeoff>(
+                        set_mode_client_, set_mode_request, goal_handle,
+                        "Request mode", ArdupilotInterfaceState::GUIDED_PRETAKEOFF);
+                }
             } else if (current_fsm_state == ArdupilotInterfaceState::GUIDED_PRETAKEOFF) {
                 if (armed_flag_) {
                     // Drone is armed — advance FSM regardless of how arming happened
@@ -1064,9 +1091,15 @@ void ArdupilotInterface::takeoff_handle_accepted(const std::shared_ptr<rclcpp_ac
                     "Request takeoff", ArdupilotInterfaceState::MC_HOVER);
             } else if (current_fsm_state == ArdupilotInterfaceState::MC_HOVER) {
                 if ((alt_ - home_alt_) > MC_TAKEOFF_COMPLETED_RATIO * takeoff_altitude) {
-                    feedback->message = "MC takeoff completed";
-                    goal_handle->publish_feedback(feedback);
-                    taking_off = false;
+                    if (alt_reached_since_us == 0) {
+                        alt_reached_since_us = current_time_us;
+                    } else if (current_time_us > (alt_reached_since_us + MC_TAKEOFF_COMPLETED_DEBOUNCE_SEC * 1000000)) {
+                        feedback->message = "MC takeoff completed";
+                        goal_handle->publish_feedback(feedback);
+                        taking_off = false;
+                    }
+                } else {
+                    alt_reached_since_us = 0; // Reset debounce: transient glitch, not a sustained climb
                 }
             }
         } else if (mav_type_ == 1) { // Fixed-wing/VTOL

@@ -1,0 +1,50 @@
+<%
+  # T2 hybrid aerial/aquatic transition — ArduPilot SITL + BiguaSim run natively
+  # on the host (see aircraft_resources/missions/t2_sitl_run.sh and
+  # biguasim_sim_runner.py — they can't share a process with ROS2 Humble,
+  # see biguasim_sim_runner.py's docstring). This tmux session only starts the
+  # ROS2 (Humble) side: MAVROS, autopilot_interface, mission, biguasim_bridge.
+  #
+  # Run this against the existing aircraft-image with the host's network
+  # namespace so MAVROS/UDP telemetry can reach the host's ArduPilot SITL and
+  # biguasim_sim_runner.py directly on 127.0.0.1:
+  #   docker run --rm -it --network host \
+  #     -v $(pwd)/aircraft/t2_aircraft.yml.erb:/aas/t2_aircraft.yml.erb \
+  #     --entrypoint bash aircraft-image \
+  #     -c "tmuxinator start -p /aas/t2_aircraft.yml.erb"
+
+  drone_id = ENV.fetch('DRONE_ID', 0).to_i
+  conops = ENV.fetch('T2_CONOPS', '/aas/aircraft_resources/missions/t2_land_test.yaml')
+%>
+
+name: t2_bridge
+
+windows:
+
+  - mavros:
+      layout: even-horizontal
+      panes:
+        - >
+          ros2 launch mavros apm.launch fcu_url:=tcp://127.0.0.1:5760@ 2>&1 | grep --line-buffered -v "RTT too high" &
+          until ros2 topic echo /mavros/state --once 2>/dev/null | grep -q "connected: true"; do sleep 1; done &&
+          echo "MAVROS connected." &&
+          ros2 service call /mavros/set_stream_rate mavros_msgs/srv/StreamRate "{stream_id: 0, message_rate: 10, on_off: true}"
+
+  - ardupilot_interface:
+      layout: even-horizontal
+      panes:
+        - ros2 run autopilot_interface ardupilot_interface --ros-args -r __ns:=/Drone<%= drone_id %>
+
+  - biguasim_bridge:
+      layout: even-horizontal
+      panes:
+        - ros2 launch biguasim_bridge biguasim_bridge.launch.py
+
+  - mission:
+      layout: even-horizontal
+      panes:
+        - >
+          until ros2 topic echo /mavros/state --once 2>/dev/null | grep -q "connected: true"; do sleep 1; done &&
+          until ros2 topic echo /mavros/state --once 2>/dev/null | grep -q "system_status: 3"; do sleep 1; done &&
+          echo "FCU in standby, starting mission." &&
+          DRONE_TYPE=quad DRONE_ID=<%= drone_id %> ros2 run mission mission --conops <%= conops %> --ros-args -r __ns:=/Drone<%= drone_id %>

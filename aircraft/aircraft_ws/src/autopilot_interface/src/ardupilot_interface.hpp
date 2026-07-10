@@ -126,6 +126,7 @@ private:
     // Quad tangential speed is determinted by WPNAV_SPEED 500 (in cm/s) in iris_with_ardupilot/ardupilot-4.6.params
     // Constants - Takeoff
     static constexpr double MC_TAKEOFF_COMPLETED_RATIO = 0.9; // Percentage of the target altitude, for a multicopter, to consider the takeoff action complete
+    static constexpr double MC_TAKEOFF_COMPLETED_DEBOUNCE_SEC = 0.5; // Altitude must stay above threshold this long before declaring takeoff complete (rejects transient GPS/baro glitches, e.g. BiguaSim AHRS-init spikes)
     static constexpr double VTOL_TAKEOFF_ALT_THRESH = 2.0; // Altitude (m) to switch to state VTOL_TAKEOFF_HEADING (Unused)
     static constexpr double VTOL_TAKEOFF_TRANSITION_WAIT_SEC = 10.0; // Time in seconds to wait in CRUISE mode before sending the VTOL takeoff loiter mission
     static constexpr double VTOL_TAKEOFF_LOITER_RADIUS = 200.0; // Radius (m), for a VTOL, of the post-takeoff loiter

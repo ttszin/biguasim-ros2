@@ -103,6 +103,7 @@ class MissionNode(Node):
         self.descend_to_water_active = False
         self.descend_to_water_start = None
         self.descend_to_water_timeout = 180.0
+        self.descend_to_water_last_send = None
         # ascend_from_water: vel.z=+2 m/s (GPS-free) until AERIAL_NAV, refreshed every 10s
         self.ascend_from_water_active = False
         self.ascend_from_water_start = None
@@ -247,7 +248,11 @@ class MissionNode(Node):
         with self.data_lock:
             self.lat = msg.latitude
             self.lon = msg.longitude
-            if self.home_lat is None:
+            # MAVROS can publish an all-zero placeholder before the FCU has a real GPS
+            # fix; skip capturing home from that, otherwise wait_to_reach_position's
+            # distance math (which relies on home_lat/home_lon) is permanently wrong.
+            position_valid = not (abs(msg.latitude) < 1e-6 and abs(msg.longitude) < 1e-6)
+            if self.home_lat is None and position_valid:
                 self.home_lat = msg.latitude
                 self.home_lon = msg.longitude
 
@@ -577,8 +582,8 @@ class MissionNode(Node):
                     self.land_complete_waiting = False
             return
 
-        # descend_to_water: float setpoint + mission_step advance happen in nav_mode_callback.
-        # This block only handles timeout.
+        # descend_to_water: re-send vel.z=-2 every 10s to keep GUID_TIMEOUT alive.
+        # mission_step advance happens in nav_mode_callback when AQUATIC_NAV fires.
         if self.descend_to_water_active:
             elapsed = (self.get_clock().now() - self.descend_to_water_start).nanoseconds / 1e9
             if elapsed > self.descend_to_water_timeout:
@@ -586,6 +591,16 @@ class MissionNode(Node):
                 self.descend_to_water_active = False
                 self.descend_to_water_start = None
                 self.mission_step = -1
+                return
+            last_send_elapsed = (self.get_clock().now() - self.descend_to_water_last_send).nanoseconds / 1e9
+            if last_send_elapsed >= 10.0:
+                req = SetReposition.Request()
+                req.north = 0.0
+                req.east = 0.0
+                req.altitude = -10.0  # < -1 → vel.z = -2 m/s (GPS-free descent)
+                self._call_service_no_advance(self._reposition_client, req)
+                self.descend_to_water_last_send = self.get_clock().now()
+                self.get_logger().info("descend_to_water: re-sending descent command.")
             return
 
         # ascend_from_water: re-send vel.z=+2 every 10s to keep GUID_TIMEOUT alive.
@@ -794,6 +809,7 @@ class MissionNode(Node):
             self._call_service_no_advance(self._reposition_client, req)
             self.descend_to_water_active = True
             self.descend_to_water_start = self.get_clock().now()
+            self.descend_to_water_last_send = self.get_clock().now()
             self.descend_to_water_timeout = timeout
             self.get_logger().info(f"descend_to_water: descending at 2 m/s until AQUATIC_NAV (timeout={timeout}s).")
 

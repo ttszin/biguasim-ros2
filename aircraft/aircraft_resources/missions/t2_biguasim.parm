@@ -1,0 +1,54 @@
+# BiguaSim T2 SITL overrides — ArduPilot NAME VALUE format (2-column)
+
+# Frame
+FRAME_CLASS 1
+FRAME_TYPE 1
+
+# Don't yaw to face each waypoint (prevents heading-error-induced spin)
+WP_YAW_BEHAVIOR 0
+
+# BiguaSim _unipolar_pwm is LINEAR (omega proportional to PWM).
+# Default expo=0.65 expects curved thrust; set to 0 for linear match.
+MOT_THST_EXPO 0.0
+
+# BiguaSim DjiMatrice hover omega ≈ 374.8 / 592.4 max ≈ 0.633 of max throttle
+MOT_THST_HOVER 0.633
+
+# Safe navigation speed/accel for simulation (default is 10 m/s which is too fast)
+WPNAV_SPEED 200
+WPNAV_ACCEL 100
+# Faster vertical descent so the drone crosses the EKF-glitch zone quickly
+WPNAV_SPEED_DN 400
+
+# Reject GPS jumps > 5m as glitches (default 25m accepts the ~17m BiguaSim GPS
+# artifact that fires when the drone descends past the bridge deck level,
+# causing a false EKF horizontal reset and restarting the approach loop).
+EK3_GLITCH_RAD 5
+
+# Increase GPS altitude noise so EKF trusts barometer over GPS for altitude.
+# Prevents the GPS altitude glitch (same trigger as the horizontal one) from
+# causing the controller to think the drone is below the target and ascend.
+EK3_ALT_M_NSE 20
+
+# Tilt limit 30°
+ANGLE_MAX 3000
+
+# Keep the velocity setpoint active for 15 s after the last MAVLink message.
+# With 2 m/s descent and spawn at bsim_z=18.4 m, the drone travels 30 m in 15 s,
+# reaching bsim_z=-11.6 m (target depth). AQUATIC_NAV triggers at ~10.7 s (before
+# timeout), so the mission advances while the drone is still descending.
+GUID_TIMEOUT 15
+
+# Prevent ArduPilot from auto-disarming when the drone rests on the river bottom.
+# Default DISARM_DELAY=10s would disarm motors while the drone is still underwater,
+# making it unable to execute the ascent and land steps after the ROV tour.
+DISARM_DELAY 0
+
+# EKF health — SITL tolerances
+# FS_EKF_ACTION 0: warn only, don't change flight mode when EKF variance spikes.
+# BiguaSim GPS synthesizer produces position jumps at bridge-deck level and during
+# AHRS init; default action=1 (AltHold) would interrupt the landing sequence.
+FS_EKF_ACTION 0
+# Relax innovation check scale from default 100 to 200 so transient GPS artifacts
+# (bridge-deck crossing, SITL GPS lock settling) don't trip the EKF health flag.
+EK3_CHECK_SCALE 200

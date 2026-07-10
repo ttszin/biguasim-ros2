@@ -4,7 +4,7 @@
 # Usage: bash t2_sitl_run.sh
 
 EEPROM="/home/teteu/ardupilot/Tools/autotest/eeprom.bin"
-PARAMS="/home/teteu/ardupilot/Tools/autotest/t2_biguasim.parm"
+PARAMS="$(realpath "$(dirname "$0")/t2_biguasim.parm")"
 SIM_VEHICLE="/home/teteu/ardupilot/Tools/autotest/sim_vehicle.py"
 
 if [ -f "$EEPROM" ]; then
