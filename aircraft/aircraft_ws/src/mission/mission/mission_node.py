@@ -120,7 +120,7 @@ class MissionNode(Node):
         # GPS-free velocity mode (altitude>10) with east/north as centering velocity
         # and vertical_velocity as a variable descent rate.
         self.vision_land_active = False
-        self.vision_land_target_class_id = "color_target"
+        self.vision_land_target_class_id = "shape_target"
         self.vision_land_start = None
         self.vision_land_timeout = 120.0
         self.vision_land_last_send = None
@@ -937,7 +937,7 @@ class MissionNode(Node):
                 f"ascend_to_altitude: ascending to {target_msl:.1f} MSL (current {alt_str}).")
 
         elif action_type == 'vision_land':
-            self.vision_land_target_class_id = str(params.get('target_class_id', 'color_target'))
+            self.vision_land_target_class_id = str(params.get('target_class_id', 'shape_target'))
             self.vision_land_timeout = float(params.get('timeout', 120.0))
             self.vision_land_centered_threshold_deg = float(params.get('centered_threshold_deg', 5.0))
             self.vision_land_min_confirm_secs = float(params.get('min_confirm_secs', 2.0))

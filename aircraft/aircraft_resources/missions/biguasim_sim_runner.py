@@ -46,7 +46,7 @@ from biguasim.ardubridge import ArduBiguaSimRunner, VehicleProfile
 from biguasim.ardubridge.frame import depth_to_pressure
 from biguasim.ardubridge.vehicle import VEHICLE_REGISTRY
 
-from marker_detector import ArucoDetector, ColorTargetDetector
+from marker_detector import ArucoDetector, ShapeTargetDetector
 
 # Perfil padrão do DjiMatrice (motor_mapping correto via sitl-test) com DepthSensor habilitado.
 HYDRONE_HYBRID = replace(VEHICLE_REGISTRY["DjiMatrice"], include_depth_sensor=True)
@@ -118,9 +118,11 @@ class BiguaSimT2Runner(ArduBiguaSimRunner):
 
         self._last_telemetry_send = 0.0
 
-        # Marker/target detection (ArUco + color blob), run on the RGBCamera frame.
+        # Marker/target detection (ArUco + circular-shape blob), run on the RGBCamera
+        # frame. Shape-based, not color-based, since lighting drifts the rendered
+        # color of any given material significantly more than it distorts silhouette.
         self._marker_detector_aruco = ArucoDetector()
-        self._marker_detector_color = ColorTargetDetector()
+        self._marker_detector_shape = ShapeTargetDetector()
         self._last_detection_run = 0.0
         self._show_camera = show_camera
         # Pinhole approximation (same formula as yolo_node.py) from the assumed DFOV,
@@ -186,7 +188,7 @@ class BiguaSimT2Runner(ArduBiguaSimRunner):
 
         self._stream_camera_frame(frame_bgr)
 
-        raw = self._marker_detector_aruco.detect(frame_bgr) + self._marker_detector_color.detect(frame_bgr)
+        raw = self._marker_detector_aruco.detect(frame_bgr) + self._marker_detector_shape.detect(frame_bgr)
         detections = []
         for cx, cy, box_w, box_h, class_id, confidence in raw:
             dx = cx - w_half
@@ -258,11 +260,13 @@ class BiguaSimT2Runner(ArduBiguaSimRunner):
         env.step(self._step_cmds(motor_cmds, rov_cmd))
 
         if self._landing_target_location is not None:
-            # Testable-today color target for vision_land (spawn_prop only supports
+            # Testable-today shape target for vision_land (spawn_prop only supports
             # basic shapes/materials — no way to apply a custom ArUco texture via
             # the Python API; that would need placing a marker manually in the
-            # Unreal Editor). "gold" gives strong contrast against the platform.
-            env.spawn_prop("box", location=self._landing_target_location, scale=0.5,
+            # Unreal Editor). "sphere" so ShapeTargetDetector sees a circle from
+            # directly overhead regardless of yaw/lighting; material is cosmetic
+            # only now (detection is shape-based, not color-based).
+            env.spawn_prop("sphere", location=self._landing_target_location, scale=0.5,
                             material="gold", tag="landing_target")
 
         if self._spawn_location is not None:

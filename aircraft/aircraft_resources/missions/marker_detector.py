@@ -52,32 +52,63 @@ class ArucoDetector:
         return detections
 
 
-class ColorTargetDetector:
-    """Detects the largest blob within an HSV color range (default: orange/red)."""
+class ShapeTargetDetector:
+    """Detects a circular target by shape, not color — robust to lighting changes.
 
-    def __init__(self, hsv_lower=(0, 120, 100), hsv_upper=(15, 255, 255),
-                 min_area_px: int = 150, class_id: str = "color_target"):
-        self.hsv_lower = np.array(hsv_lower, dtype=np.uint8)
-        self.hsv_upper = np.array(hsv_upper, dtype=np.uint8)
+    Pairs with spawn_prop("sphere", ...) in biguasim_sim_runner.py: viewed from
+    a nadir (straight-down) camera, a sphere always projects a circle regardless
+    of orientation or scene lighting, unlike a color threshold (which drifts with
+    illumination/material shading) or a box (whose silhouette changes with yaw).
+    Uses Otsu's threshold (auto-calibrates to the frame's own brightness split
+    instead of a fixed color range) + contour circularity, so it keeps working
+    whether the sphere renders bright-on-dark or dark-on-bright.
+    """
+
+    def __init__(self, min_area_px: int = 150, max_area_fraction: float = 0.5,
+                 min_circularity: float = 0.85, class_id: str = "shape_target"):
+        # min_circularity=0.85 is deliberately above a square/rectangle's ceiling
+        # (4*pi*A/P^2 = pi/4 ~= 0.785) — otherwise background/frame-spanning
+        # rectangular contours pass the filter and (being large) win the area-based
+        # selection below over the actual, smaller, more-circular target.
         self.min_area_px = min_area_px
+        self.max_area_fraction = max_area_fraction
+        self.min_circularity = min_circularity
         self.class_id = class_id
 
     def detect(self, frame) -> list:
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, self.hsv_lower, self.hsv_upper)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        max_area = self.max_area_fraction * frame.shape[0] * frame.shape[1]
+        # THRESH_OTSU picks its own cutoff from the frame's histogram (lighting-
+        # invariant); try both polarities since we don't know if the sphere is
+        # brighter or darker than its background in a given shot.
+        _, mask_bright = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        _, mask_dark = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        best = None
+        best_score = 0.0
+        for mask in (mask_bright, mask_dark):
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area < self.min_area_px or area > max_area:
+                    continue
+                perimeter = cv2.arcLength(contour, True)
+                if perimeter <= 0:
+                    continue
+                circularity = 4 * np.pi * area / (perimeter ** 2)  # 1.0 = perfect circle
+                if circularity < self.min_circularity:
+                    continue
+                if area > best_score:
+                    best_score = area
+                    best = (contour, circularity)
+
+        if best is None:
             return []
 
-        largest = max(contours, key=cv2.contourArea)
-        area = cv2.contourArea(largest)
-        if area < self.min_area_px:
-            return []
-
-        x, y, w, h = cv2.boundingRect(largest)
+        contour, circularity = best
+        x, y, w, h = cv2.boundingRect(contour)
         cx = float(x + w / 2.0)
         cy = float(y + h / 2.0)
-        frame_area = frame.shape[0] * frame.shape[1]
-        confidence = float(min(area / (frame_area * 0.5), 1.0))
-        return [(cx, cy, float(w), float(h), self.class_id, confidence)]
+        return [(cx, cy, float(w), float(h), self.class_id, float(circularity))]

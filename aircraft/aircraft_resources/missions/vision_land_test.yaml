@@ -5,13 +5,14 @@ steps:
       takeoff_altitude: 8.0
 
   # --- PHASE 2: Center on the landing target using vision, then descend ---
-  # Target: a "gold" box spawned by biguasim_sim_runner.py right on the platform
-  # (its spawn_location), detected by marker_detector.py's ColorTargetDetector
-  # (class_id "color_target"). Switch target_class_id to "aruco_<id>" if an ArUco
-  # marker was placed manually in the Unreal Editor instead.
+  # Target: a "gold" sphere spawned by biguasim_sim_runner.py right on the platform
+  # (its spawn_location), detected by marker_detector.py's ShapeTargetDetector
+  # (class_id "shape_target", circularity-based, lighting-independent). Switch
+  # target_class_id to "aruco_<id>" if an ArUco marker was placed manually in the
+  # Unreal Editor instead.
   - action: vision_land
     params:
-      target_class_id: color_target
+      target_class_id: shape_target
       timeout: 120.0
       centered_threshold_deg: 5.0
       min_confirm_secs: 2.0

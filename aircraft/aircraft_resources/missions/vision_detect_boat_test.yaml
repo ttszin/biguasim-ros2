@@ -1,0 +1,27 @@
+steps:
+  # Detection-only test: fly over the BlueBoat and hover, watching /detections
+  # and /biguasim/camera/image (or --show-camera) to validate ArUco/shape-target
+  # detection quality before wiring up vision_land's centering/descent control.
+  # No vision_land step here — land is the regular guided one, not vision-guided.
+  - action: takeoff
+    params:
+      takeoff_altitude: 8.0
+
+  # Reuses the exact north/east offset already validated by t2_land_test.yaml
+  # (bsim_x = spawn_x(8) + 17 = 25), matching the BlueBoat's spawn location in
+  # biguasim_sim_runner.py's --landing-target boat mode.
+  - action: go_to_known_gps_waypoint
+    params:
+      north: 17.0
+      east: 0.0
+      altitude: 8.0
+
+  # Hover over the boat — plenty of time to watch detections come in.
+  - action: wait
+    params:
+      duration: 180.0
+
+  - action: land
+    params:
+      landing_altitude: 0.0
+      vtol_transition_heading: 0.0

@@ -86,14 +86,24 @@ T2_CONOPS=/aas/aircraft_resources/missions/vision_land_test.yaml \
 ```
 
 Available conops in `aircraft_resources/missions/`: `t2_land_test.yaml` (the
-original aerial/aquatic transition), `vision_land_test.yaml` (ArUco/color-target
-precision landing on the takeoff platform), `vision_land_boat_test.yaml` (same,
-landing on a stationary BlueBoat out on the water instead). The latter two need
-`biguasim_sim_runner.py` started with a matching `--landing-target
-{platform,boat}` flag (step 2 above) so the target actually gets spawned; add
-`--show-camera` to that same command for a live `cv2.imshow` debug window with
-detection overlays, independent of the `/biguasim/camera/image` ROS2 topic that
-`biguasim_bridge` always republishes.
+original aerial/aquatic transition), plus two rounds of vision testing —
+detection first, landing control second (kept as separate steps/missions on
+purpose, so a bad detection can't be confused with a bad control loop):
+
+- **Detection only**, no `vision_land` step, regular guided `land` at the end:
+  `t2_hover_test.yaml` (platform target) and `vision_detect_boat_test.yaml`
+  (BlueBoat target) — just takeoff, hover over the target, watch `/detections`
+  and `/biguasim/camera/image` (or `--show-camera`) to validate detection
+  quality before trusting it to fly anything.
+- **Detection + landing control**: `vision_land_test.yaml` (platform) and
+  `vision_land_boat_test.yaml` (BlueBoat) — adds the `vision_land` centering/
+  descent step. **Not yet tested live** — see the commit history for status.
+
+The `*boat*` conops need `biguasim_sim_runner.py` started with a matching
+`--landing-target {platform,boat}` flag (step 2 above) so the target actually
+gets spawned; add `--show-camera` to that same command for a live `cv2.imshow`
+debug window with detection overlays, independent of the
+`/biguasim/camera/image` ROS2 topic that `biguasim_bridge` always republishes.
 
 ## Bugs found during end-to-end validation
 

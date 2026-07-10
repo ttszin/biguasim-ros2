@@ -19,15 +19,16 @@ steps:
       duration: 10.0
 
   # --- PHASE 3: Center on the landing target using vision, then descend ---
-  # Target: a "gold" box spawned on top of the (stationary) BlueBoat by
+  # Target: a "gold" sphere spawned on top of the (stationary) BlueBoat by
   # biguasim_sim_runner.py --landing-target boat, detected by marker_detector.py's
-  # ColorTargetDetector (class_id "color_target"). Switch target_class_id to
-  # "aruco_<id>" if an ArUco marker was placed manually on the boat in the Unreal
-  # Editor instead. The boat does not move during this test (see plan notes) —
-  # tracking through a moving target's final touchdown is not implemented yet.
+  # ShapeTargetDetector (class_id "shape_target", circularity-based, lighting-
+  # independent). Switch target_class_id to "aruco_<id>" if an ArUco marker was
+  # placed manually on the boat in the Unreal Editor instead. The boat does not
+  # move during this test (see plan notes) — tracking through a moving target's
+  # final touchdown is not implemented yet.
   - action: vision_land
     params:
-      target_class_id: color_target
+      target_class_id: shape_target
       timeout: 120.0
       centered_threshold_deg: 5.0
       min_confirm_secs: 2.0
