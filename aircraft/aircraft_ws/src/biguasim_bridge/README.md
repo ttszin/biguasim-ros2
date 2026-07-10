@@ -51,6 +51,28 @@ Humble container via `t2_aircraft.yml.erb`. `--network host` avoids Docker
 networking entirely — MAVROS and the UDP telemetry sockets talk to
 `127.0.0.1` exactly as they would on bare host.
 
+## Prerequisites
+
+None of this comes from just cloning the repo — before "How to run" below will
+work, you need:
+
+- **BiguaSim installed natively on the host** (not in a container), with a
+  Python ≥3.11 interpreter (see "Why this package exists" above for why).
+- **ArduPilot built on the host**, specifically the `ArduCopter` SITL binary
+  that `t2_sitl_run.sh` launches.
+- **A GPU-capable machine.** BiguaSim/Unreal Engine renders real frames for
+  the RGBCamera sensor even without `--viewport` (which only toggles whether
+  a window is shown) — no GPU, no camera data, no detections.
+- **The `aircraft-image` Docker image, built locally** — this repo's
+  `docker run` commands assume the image already exists, they don't build it.
+  Build (or rebuild, after pulling any change touching `aircraft_ws/src` or
+  `aircraft_resources/patches`) with:
+  ```bash
+  docker build -f tools_and_docs/docker/aircraft.dockerfile -t aircraft-image .
+  ```
+  This takes a while and pulls in a lot (CUDA base image, MAVROS, YOLO/ONNX,
+  etc.) — budget real time for the first build.
+
 ## How to run
 
 Three terminals, from the repo root, in order:
