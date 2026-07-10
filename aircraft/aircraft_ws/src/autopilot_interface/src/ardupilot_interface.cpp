@@ -406,8 +406,10 @@ void ArdupilotInterface::set_reposition_callback(const std::shared_ptr<autopilot
         } else if (desired_alt > 10.0) {
             // GPS-free velocity mode: north/east/up velocities, no position loop.
             // north/east inputs are reused as horizontal velocity (m/s); positive north = north.
-            // Used for: ascent from water (north=0, east=0) and dead-reckoning return (north<0).
-            // MAVROS ENU→NED: velocity.z = +2.0 (ENU up) → NED vel.z = -2.0 m/s (ascend).
+            // vertical_velocity is ENU up (m/s), caller-provided (MAVROS converts ENU->NED
+            // internally, so e.g. vertical_velocity=+2.0 -> NED vel.z=-2.0, ascend).
+            // Used for: ascent from water, dead-reckoning return (north<0), and vision-guided
+            // centering/descent (vision_land, variable horizontal + vertical velocity).
             auto msg = mavros_msgs::msg::PositionTarget();
             msg.header.stamp = this->get_clock()->now();
             msg.coordinate_frame = mavros_msgs::msg::PositionTarget::FRAME_LOCAL_NED;
@@ -422,7 +424,7 @@ void ArdupilotInterface::set_reposition_callback(const std::shared_ptr<autopilot
                 mavros_msgs::msg::PositionTarget::IGNORE_YAW_RATE;
             msg.velocity.x = static_cast<float>(desired_east);   // ENU x = east velocity (m/s)
             msg.velocity.y = static_cast<float>(desired_north);  // ENU y = north velocity (m/s)
-            msg.velocity.z = +2.0f; // ENU up → ascend 2 m/s (fixed)
+            msg.velocity.z = static_cast<float>(request->vertical_velocity); // ENU up (m/s), caller-provided
             setpoint_raw_local_pub_->publish(msg);
         } else {
             // Normal aerial navigation (0 ≤ alt ≤ 10 m): GPS global setpoint.

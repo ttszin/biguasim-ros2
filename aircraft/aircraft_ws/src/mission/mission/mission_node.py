@@ -115,6 +115,22 @@ class MissionNode(Node):
         self.ascend_to_alt_start = None
         self.ascend_to_alt_timeout = 120.0
         self.ascend_to_alt_last_send = None
+        # vision_land: closed-loop centering + descent over a detected marker/target,
+        # driven by /detections (self.yolo_detections). Reuses SetReposition's
+        # GPS-free velocity mode (altitude>10) with east/north as centering velocity
+        # and vertical_velocity as a variable descent rate.
+        self.vision_land_active = False
+        self.vision_land_target_class_id = "color_target"
+        self.vision_land_start = None
+        self.vision_land_timeout = 120.0
+        self.vision_land_last_send = None
+        self.vision_land_centered_since = None
+        self.vision_land_centered_threshold_deg = 5.0
+        self.vision_land_min_confirm_secs = 2.0
+        self.vision_land_land_alt_msl = 571.5
+        self.vision_land_kp_horizontal = 0.05  # m/s per degree of azimuth/elevation error
+        self.vision_land_max_horizontal_vel = 2.0
+        self.vision_land_descend_vel = 1.0  # m/s, applied (as a descent) only once centered
         # wait_to_reach_position: advance when EKF lat/lon is within threshold of target north/east
         self.reach_position_active = False
         self.reach_position_target_north = 0.0
@@ -619,6 +635,7 @@ class MissionNode(Node):
                 req.north = 0.0
                 req.east = 0.0
                 req.altitude = 15.0  # > 10 → vel.z = +2 m/s (GPS-free ascent)
+                req.vertical_velocity = 2.0
                 self._call_service_no_advance(self._reposition_client, req)
                 self.ascend_from_water_last_send = self.get_clock().now()
                 self.get_logger().info("ascend_from_water: re-sending ascent command.")
@@ -646,11 +663,79 @@ class MissionNode(Node):
                 req.north = 0.0
                 req.east = 0.0
                 req.altitude = 15.0
+                req.vertical_velocity = 2.0
                 self._call_service_no_advance(self._reposition_client, req)
                 self.ascend_to_alt_last_send = self.get_clock().now()
                 alt_str = f"{current_alt:.1f}" if current_alt is not None else "N/A"
                 self.get_logger().info(
                     f"ascend_to_altitude: re-sending vel.z+2 (alt={alt_str} MSL, target={self.ascend_to_alt_target_msl:.1f}).")
+            return
+
+        if self.vision_land_active:
+            elapsed = (self.get_clock().now() - self.vision_land_start).nanoseconds / 1e9
+            if elapsed > self.vision_land_timeout:
+                self.get_logger().error(
+                    f"Timeout waiting to center on '{self.vision_land_target_class_id}' in vision_land.")
+                self.vision_land_active = False
+                self.mission_step = -1
+                return
+
+            with self.data_lock:
+                detections_msg = self.yolo_detections
+                current_alt = self.alt_msl
+
+            azimuth_deg = None
+            elevation_deg = None
+            if detections_msg is not None:
+                for detection in detections_msg.detections:
+                    for result in detection.results:
+                        if result.hypothesis.class_id == self.vision_land_target_class_id:
+                            azimuth_deg = result.pose.pose.position.x
+                            elevation_deg = result.pose.pose.position.y
+                            break
+                    if azimuth_deg is not None:
+                        break
+
+            if azimuth_deg is None:
+                # Target not currently visible: hold position, don't descend blind.
+                east_vel = 0.0
+                north_vel = 0.0
+                vertical_vel = 0.0
+                self.vision_land_centered_since = None
+            else:
+                east_vel = max(-self.vision_land_max_horizontal_vel, min(
+                    self.vision_land_max_horizontal_vel, self.vision_land_kp_horizontal * azimuth_deg))
+                north_vel = max(-self.vision_land_max_horizontal_vel, min(
+                    self.vision_land_max_horizontal_vel, self.vision_land_kp_horizontal * elevation_deg))
+                centered = (abs(azimuth_deg) < self.vision_land_centered_threshold_deg
+                            and abs(elevation_deg) < self.vision_land_centered_threshold_deg)
+                # Only descend once centered — avoids diving toward a target seen at an angle.
+                vertical_vel = -self.vision_land_descend_vel if centered else 0.0
+                low_enough = current_alt is not None and current_alt <= self.vision_land_land_alt_msl
+                now = self.get_clock().now()
+                if centered and low_enough:
+                    if self.vision_land_centered_since is None:
+                        self.vision_land_centered_since = now
+                    elif (now - self.vision_land_centered_since).nanoseconds / 1e9 >= self.vision_land_min_confirm_secs:
+                        self.get_logger().info(
+                            f"vision_land: centered and low ({current_alt:.1f} MSL) for "
+                            f"{self.vision_land_min_confirm_secs}s, advancing to land.")
+                        self.vision_land_active = False
+                        self.mission_step += 1
+                        return
+                else:
+                    self.vision_land_centered_since = None
+
+            last_send_elapsed = (999.0 if self.vision_land_last_send is None else
+                (self.get_clock().now() - self.vision_land_last_send).nanoseconds / 1e9)
+            if last_send_elapsed >= 1.0:
+                req = SetReposition.Request()
+                req.east = east_vel
+                req.north = north_vel
+                req.altitude = 15.0  # > 10 → GPS-free velocity mode
+                req.vertical_velocity = vertical_vel
+                self._call_service_no_advance(self._reposition_client, req)
+                self.vision_land_last_send = self.get_clock().now()
             return
 
         if self.reach_position_active:
@@ -819,6 +904,7 @@ class MissionNode(Node):
             req.north = 0.0
             req.east = 0.0
             req.altitude = 15.0  # > 10 → vel.z = +2 m/s, GPS-free ascent
+            req.vertical_velocity = 2.0
             self._call_service_no_advance(self._reposition_client, req)
             self.ascend_from_water_active = True
             self.ascend_from_water_start = self.get_clock().now()
@@ -839,6 +925,7 @@ class MissionNode(Node):
             req.north = 0.0
             req.east = 0.0
             req.altitude = 15.0
+            req.vertical_velocity = 2.0
             self._call_service_no_advance(self._reposition_client, req)
             self.ascend_to_alt_active = True
             self.ascend_to_alt_target_msl = target_msl
@@ -848,6 +935,21 @@ class MissionNode(Node):
             alt_str = f"{current_alt:.1f}" if current_alt is not None else "N/A"
             self.get_logger().info(
                 f"ascend_to_altitude: ascending to {target_msl:.1f} MSL (current {alt_str}).")
+
+        elif action_type == 'vision_land':
+            self.vision_land_target_class_id = str(params.get('target_class_id', 'color_target'))
+            self.vision_land_timeout = float(params.get('timeout', 120.0))
+            self.vision_land_centered_threshold_deg = float(params.get('centered_threshold_deg', 5.0))
+            self.vision_land_min_confirm_secs = float(params.get('min_confirm_secs', 2.0))
+            self.vision_land_land_alt_msl = float(params.get('land_alt_msl', 571.5))
+            self.vision_land_active = True
+            self.vision_land_start = self.get_clock().now()
+            self.vision_land_last_send = None
+            self.vision_land_centered_since = None
+            self.get_logger().info(
+                f"vision_land: centering on '{self.vision_land_target_class_id}' "
+                f"(timeout={self.vision_land_timeout}s).")
+            return
 
         elif action_type == 'wait_to_reach_position':
             target_north = float(params.get('north', 0.0))

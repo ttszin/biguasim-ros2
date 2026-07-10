@@ -1,0 +1,51 @@
+steps:
+  # --- PHASE 1: Takeoff from platform ---
+  - action: takeoff
+    params:
+      takeoff_altitude: 8.0
+
+  # --- PHASE 2: Fly to the water area, above the BlueBoat ---
+  # Reuses the exact north/east offset already validated by t2_land_test.yaml
+  # (bsim_x = spawn_x(8) + 17 = 25), matching the BlueBoat's spawn location in
+  # biguasim_sim_runner.py's --landing-target boat mode.
+  - action: go_to_known_gps_waypoint
+    params:
+      north: 17.0
+      east: 0.0
+      altitude: 5.0
+
+  - action: wait
+    params:
+      duration: 10.0
+
+  # --- PHASE 3: Center on the landing target using vision, then descend ---
+  # Target: a "gold" box spawned on top of the (stationary) BlueBoat by
+  # biguasim_sim_runner.py --landing-target boat, detected by marker_detector.py's
+  # ColorTargetDetector (class_id "color_target"). Switch target_class_id to
+  # "aruco_<id>" if an ArUco marker was placed manually on the boat in the Unreal
+  # Editor instead. The boat does not move during this test (see plan notes) —
+  # tracking through a moving target's final touchdown is not implemented yet.
+  - action: vision_land
+    params:
+      target_class_id: color_target
+      timeout: 120.0
+      centered_threshold_deg: 5.0
+      min_confirm_secs: 2.0
+      # ESTIMATE, not yet empirically confirmed: the boat sits at BiguaSim z=0,
+      # 13.4m lower than the platform/home (spawn z=13.4, see biguasim_sim_runner.py
+      # --location default) — home is ≈570.66 MSL (t2_biguasim.parm), so
+      # 570.66 - 13.4 + 0.4 (deck height) ≈ 557.7. Adjust after watching a real run
+      # (check the mission log's "Global Position: alt" once hovering just above
+      # the boat).
+      land_alt_msl: 557.7
+
+  # --- PHASE 4: Land on the boat (direct LAND mode, no RTL) ---
+  - action: land
+    params:
+      landing_altitude: -1.0
+      vtol_transition_heading: 0.0
+
+  # Detect land_complete on the boat.
+  - action: wait_for_land_complete
+    params:
+      timeout: 60.0

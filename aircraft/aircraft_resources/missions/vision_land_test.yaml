@@ -1,0 +1,31 @@
+steps:
+  # --- PHASE 1: Takeoff from platform ---
+  - action: takeoff
+    params:
+      takeoff_altitude: 8.0
+
+  # --- PHASE 2: Center on the landing target using vision, then descend ---
+  # Target: a "gold" box spawned by biguasim_sim_runner.py right on the platform
+  # (its spawn_location), detected by marker_detector.py's ColorTargetDetector
+  # (class_id "color_target"). Switch target_class_id to "aruco_<id>" if an ArUco
+  # marker was placed manually in the Unreal Editor instead.
+  - action: vision_land
+    params:
+      target_class_id: color_target
+      timeout: 120.0
+      centered_threshold_deg: 5.0
+      min_confirm_secs: 2.0
+      # ~1m above the platform (home/platform ≈ 570.66 MSL, see t2_biguasim.parm).
+      land_alt_msl: 571.5
+
+  # --- PHASE 3: Land on platform (direct LAND mode, no RTL) ---
+  - action: land
+    params:
+      landing_altitude: -1.0
+      vtol_transition_heading: 0.0
+
+  # Detect land_complete on platform.
+  # Expected log: "Land complete ... Surface: platform."
+  - action: wait_for_land_complete
+    params:
+      timeout: 60.0

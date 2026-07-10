@@ -47,10 +47,53 @@ HOST (Ubuntu 24.04, native, unchanged)          CONTAINER (aircraft-image, Humbl
 ```
 
 Run order: `t2_sitl_run.sh` → `biguasim_sim_runner.py [--viewport]` → the
-Humble container via `t2_aircraft.yml.erb` (see that file's header for the
-exact `docker run` command). `--network host` avoids Docker networking
-entirely — MAVROS and the UDP telemetry sockets talk to `127.0.0.1` exactly
-as they would on bare host.
+Humble container via `t2_aircraft.yml.erb`. `--network host` avoids Docker
+networking entirely — MAVROS and the UDP telemetry sockets talk to
+`127.0.0.1` exactly as they would on bare host.
+
+## How to run
+
+Three terminals, from the repo root, in order:
+
+```bash
+# 1. Host, native — ArduCopter SITL
+bash aircraft/aircraft_resources/missions/t2_sitl_run.sh
+
+# 2. Host, native — BiguaSim (add --viewport to see the Unreal Engine window)
+python3 aircraft/aircraft_resources/missions/biguasim_sim_runner.py --viewport
+
+# 3. Container — MAVROS + autopilot_interface + biguasim_bridge + mission (Humble)
+docker run --rm -it --network host \
+  -v $(pwd)/aircraft/t2_aircraft.yml.erb:/aas/t2_aircraft.yml.erb \
+  --entrypoint bash aircraft-image \
+  -c "tmuxinator start -p /aas/t2_aircraft.yml.erb"
+```
+
+Command 3 opens a tmux session with 4 windows (`mavros`, `ardupilot_interface`,
+`biguasim_bridge`, `mission`) — switch with `Ctrl-b` + window number. It waits
+for MAVROS to report `connected: true` and `system_status: 3` before starting
+`mission` (see bug #2 below), so there's nothing to race against.
+
+Which mission conops runs is controlled by the `T2_CONOPS` env var (default
+`t2_land_test.yaml`), e.g.:
+
+```bash
+T2_CONOPS=/aas/aircraft_resources/missions/vision_land_test.yaml \
+  docker run --rm -it --network host \
+  -v $(pwd)/aircraft/t2_aircraft.yml.erb:/aas/t2_aircraft.yml.erb \
+  --entrypoint bash aircraft-image \
+  -c "tmuxinator start -p /aas/t2_aircraft.yml.erb"
+```
+
+Available conops in `aircraft_resources/missions/`: `t2_land_test.yaml` (the
+original aerial/aquatic transition), `vision_land_test.yaml` (ArUco/color-target
+precision landing on the takeoff platform), `vision_land_boat_test.yaml` (same,
+landing on a stationary BlueBoat out on the water instead). The latter two need
+`biguasim_sim_runner.py` started with a matching `--landing-target
+{platform,boat}` flag (step 2 above) so the target actually gets spawned; add
+`--show-camera` to that same command for a live `cv2.imshow` debug window with
+detection overlays, independent of the `/biguasim/camera/image` ROS2 topic that
+`biguasim_bridge` always republishes.
 
 ## Bugs found during end-to-end validation
 

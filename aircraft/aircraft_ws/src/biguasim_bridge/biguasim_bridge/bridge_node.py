@@ -14,11 +14,14 @@ import json
 import socket
 import time
 
+import cv2
+import numpy as np
 import rclpy
 from geometry_msgs.msg import Point
 from rclpy.node import Node
-from sensor_msgs.msg import FluidPressure
+from sensor_msgs.msg import FluidPressure, Image
 from std_msgs.msg import String
+from vision_msgs.msg import Detection2DArray
 
 from biguasim_bridge.encoders import TELEMETRY_ENCODERS
 
@@ -30,6 +33,7 @@ class BiguaSimBridgeNode(Node):
 
         self.declare_parameter('telemetry_port', 9100)
         self.declare_parameter('rov_cmd_port', 9101)
+        self.declare_parameter('camera_stream_port', 9103)
         self.declare_parameter('sim_host', '127.0.0.1')
         self.declare_parameter('pressure_enter_pa', 102500.0)  # ~12 cm depth
         self.declare_parameter('pressure_exit_pa', 101500.0)   # ~1.7 cm depth
@@ -42,6 +46,8 @@ class BiguaSimBridgeNode(Node):
         self.pressure_pub = self.create_publisher(FluidPressure, '/fcu/external_pressure', 10)
         self.nav_mode_pub = self.create_publisher(String, '/nav_mode', 10)
         self.rov_pos_pub = self.create_publisher(Point, '/bluerov0/local_position', 10)
+        self.detections_pub = self.create_publisher(Detection2DArray, '/detections', 10)
+        self.camera_pub = self.create_publisher(Image, '/biguasim/camera/image', 10)
         self.create_subscription(Point, '/bluerov0/cmd_pos_yaw', self._rov_cmd_cb, 10)
 
         self._nav_mode = 'AERIAL_NAV'
@@ -59,9 +65,18 @@ class BiguaSimBridgeNode(Node):
         self._telemetry_sock.bind(('0.0.0.0', telemetry_port))
         self._telemetry_sock.setblocking(False)
 
+        # Separate UDP channel for JPEG-compressed RGBCamera frames (biguasim_sim_runner.py's
+        # --camera-stream-port) — kept apart from the small-JSON telemetry socket above.
+        camera_stream_port = self.get_parameter('camera_stream_port').value
+        self._camera_stream_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._camera_stream_sock.bind(('0.0.0.0', camera_stream_port))
+        self._camera_stream_sock.setblocking(False)
+
         self.create_timer(0.005, self._poll_udp)
+        self.create_timer(0.005, self._poll_camera_stream)
         self.get_logger().info(
-            f'BiguaSim bridge ready -> listening on 0.0.0.0:{telemetry_port}, '
+            f'BiguaSim bridge ready -> listening on 0.0.0.0:{telemetry_port} '
+            f'(telemetry) and 0.0.0.0:{camera_stream_port} (camera), '
             f'forwarding ROV commands to {self._rov_cmd_addr}'
         )
 
@@ -82,6 +97,25 @@ class BiguaSimBridgeNode(Node):
             for key, encoder in TELEMETRY_ENCODERS.items():
                 if key in payload:
                     encoder(self, payload)
+
+    def _poll_camera_stream(self) -> None:
+        while True:
+            try:
+                data, _ = self._camera_stream_sock.recvfrom(65536)
+            except BlockingIOError:
+                return
+            frame_bgr = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if frame_bgr is None:
+                continue
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            msg = Image()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = 'CameraSocket'
+            msg.height, msg.width = frame_rgb.shape[:2]
+            msg.encoding = 'rgb8'
+            msg.step = msg.width * 3
+            msg.data = frame_rgb.tobytes()
+            self.camera_pub.publish(msg)
 
     def on_pressure(self, pressure: float) -> None:
         """Hysteresis + debounce pressure -> nav_mode, publishes /nav_mode on transitions."""

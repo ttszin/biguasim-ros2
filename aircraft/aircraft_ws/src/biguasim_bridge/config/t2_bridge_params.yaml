@@ -2,6 +2,7 @@
   ros__parameters:
     telemetry_port: 9100
     rov_cmd_port: 9101
+    camera_stream_port: 9103
     sim_host: 127.0.0.1
     pressure_enter_pa: 102500.0
     pressure_exit_pa: 101500.0

@@ -1,6 +1,7 @@
 float64 east
 float64 north
 float64 altitude
+float64 vertical_velocity  # m/s, ENU up (positive=ascend, negative=descend). Only used when altitude > 10.0 (GPS-free velocity mode).
 ---
 bool success
 string message
