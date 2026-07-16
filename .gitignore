@@ -133,6 +133,15 @@ simulation/simulation_resources/simulation_worlds/subaru/meshes/subaru.obj
 # debug information files
 *.dwo
 
+# BlueBoat YOLO detector: raw/split training images and model weights are
+# regenerable (collect_boat_dataset.py -> label_boat_dataset.py ->
+# prepare_yolo_dataset.py -> yolo detect train, see marker_detector.py's
+# docstring) and too large/binary for source control.
+/aircraft/aircraft_resources/missions/dataset_raw/
+/aircraft/aircraft_resources/missions/dataset_yolo/
+/aircraft/aircraft_resources/missions/runs/
+*.pt
+
 ### Python .gitignore
 
 # Byte-compiled / optimized / DLL files

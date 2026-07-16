@@ -121,11 +121,147 @@ purpose, so a bad detection can't be confused with a bad control loop):
   `vision_land_boat_test.yaml` (BlueBoat) — adds the `vision_land` centering/
   descent step. **Not yet tested live** — see the commit history for status.
 
-The `*boat*` conops need `biguasim_sim_runner.py` started with a matching
-`--landing-target {platform,boat}` flag (step 2 above) so the target actually
-gets spawned; add `--show-camera` to that same command for a live `cv2.imshow`
-debug window with detection overlays, independent of the
-`/biguasim/camera/image` ROS2 topic that `biguasim_bridge` always republishes.
+The `*boat*` conops need `biguasim_sim_runner.py` started with matching flags
+(step 2 above) so the BlueBoat and/or a target actually get spawned:
+
+- `--spawn-boat --landing-target none` — the BlueBoat has its own built-in
+  helipad marking (square deck, circle+cross touchdown mark) rendered on the
+  model itself, no synthetic target needed on top of it. **Preferred** —
+  avoids the "no custom ArUco texture via spawn_prop" limitation entirely,
+  since the marking is already baked into the BlueBoat asset.
+- `--landing-target boat` (implies `--spawn-boat`) — also drops a synthetic
+  gold sphere on the boat, for comparing detection against the built-in mark
+  or as a fallback if the built-in one doesn't detect well.
+
+Add `--show-camera` to that same command for a live `cv2.imshow` debug window
+with detection overlays, independent of the `/biguasim/camera/image` ROS2
+topic that `biguasim_bridge` always republishes.
+
+## Precision-landing vision: from classical CV to a custom YOLO detector
+
+`marker_detector.py`'s `ShapeTargetDetector` (used by `biguasim_sim_runner.py`
+for the `*boat*` conops above) went through three different approaches before
+landing on the one now in the tree.
+
+### 1. Classical CV shape detection — tried, didn't hold up
+
+The first approach avoided any ML: ellipse-fit the BlueBoat's helipad marking
+(circle+cross) directly out of contours, using a 4th-harmonic FFT signature
+on the contour's radius profile to confirm the cross and reject anything
+merely round. Explicitly *not* color-based from the start — the request was
+for lighting-independent detection, and material color under BiguaSim's
+renderer drifts with lighting far more than silhouette does.
+
+This worked at close range, but water reflections/glints kept producing
+false positives that passed the same shape filters as the real marking
+(a bright specular patch on water can be circular and even carry enough
+internal structure to fool a cross-signature check). Position-history jump
+filtering, size-ratio rejection, and confidence-decay prediction (all still
+present in `ShapeTargetDetector` today, now wrapping the YOLO output instead)
+cut down the false positives but never eliminated them, and detection range
+stayed short — the marking's fine detail (the cross) needs enough resolved
+pixels to tell apart from noise, which runs out well before the boat itself
+would otherwise still be visible. A follow-up attempt replaced the marking
+detector with a whole-hull HSV-saturation silhouette detector
+(`BoatSilhouetteDetector`, since removed — see git history) to get more
+resolvable pixels at range; it worked close in but broke down further out,
+where a single Otsu threshold split grabbed the water's own large-scale
+brightness gradient instead of the hull, and `adaptiveThreshold` alone was
+too noisy from water texture to reliably separate the boat from spurious
+candidates.
+
+**Why we didn't keep pushing on classical CV**: every fix targeted a
+specific failure mode observed in one test frame and reliably introduced or
+re-exposed a different one elsewhere (tightening thresholds to reject a
+reflection made real detections drop out at range; loosening a filter to
+recover range brought reflections back) — a sign the feature (raw
+shape/threshold statistics) doesn't actually separate "boat" from "water
+glint" well enough on its own, not that the parameters were merely
+untuned.
+
+### 2. Pretrained COCO YOLOv8n — tried, dead on arrival
+
+Before building a custom dataset, we checked whether an existing pretrained
+detector could sidestep the reflection problem entirely. Ultralytics'
+COCO-pretrained `yolov8n.pt` was tested against a real, easy reference frame
+(`template_blueboat.png`, boat filling a large fraction of the frame) at
+confidence thresholds down to 0.01 — it detected nothing, of any class. COCO's
+"boat" class is trained on eye-level/ground photography; a small twin-hull
+robot seen from directly overhead doesn't resemble any COCO training example
+closely enough to match, so this wasn't a tuning problem either.
+
+### 3. Custom-trained YOLOv8n — what's in the tree now
+
+Since no existing detector fit this exact camera geometry, we collected and
+labeled a purpose-built dataset and trained our own single-class detector:
+
+- **`collect_boat_dataset.py`** — teleports the camera agent to randomized
+  positions around the stationary BlueBoat (altitude sampled first, then
+  orbit radius capped to a fraction of that altitude so the boat reliably
+  stays inside the camera's footprint) and saves each frame plus the exact
+  camera/boat 3D pose to `metadata.jsonl`. Holds the boat still via
+  `set_physics_state(..., velocity=[0,0,0], angular_velocity=[0,0,0])` every
+  tick — `teleport()` alone let it drift/sink over the course of a long
+  collection run.
+- **`label_boat_dataset.py`** — no visual detection involved: projects the
+  boat's *known* 3D position through a calibrated pinhole camera model
+  (using the recorded camera pose from `metadata.jsonl`) to compute an exact
+  YOLO-format bounding box for every frame. Ground truth by construction,
+  not by annotation.
+- **`prepare_yolo_dataset.py`** — splits the labeled set into Ultralytics'
+  expected `images/{train,val}` + `labels/{train,val}` layout and writes
+  `data.yaml`.
+- Trained with `yolo detect train data=dataset_yolo/data.yaml
+  model=yolov8n.pt epochs=100 imgsz=640 batch=16
+  name=blueboat_detector` (500 images, 450 train / 50 val) — held-out
+  validation metrics: precision=1.0, recall=0.999, mAP50=0.995,
+  mAP50-95=0.913.
+
+`ShapeTargetDetector` now runs this model instead of the classical pipeline,
+keeping the exact same `detect(frame) -> [(cx, cy, w, h, class_id,
+confidence)]` interface and the same position-history/size-ratio filtering
+as before — a drop-in swap, no other file needed to change.
+
+The dataset (`dataset_raw/`, `dataset_yolo/`, ~500MB) and trained weights
+(`runs/`) are **not committed** (see `.gitignore`) — regenerate with:
+
+```bash
+cd aircraft/aircraft_resources/missions
+python3 collect_boat_dataset.py --num-images 500 --seed 42
+python3 label_boat_dataset.py --dataset-dir dataset_raw --preview 10   # spot-check dataset_raw/preview/ before trusting the full set
+python3 prepare_yolo_dataset.py
+yolo detect train data=dataset_yolo/data.yaml model=yolov8n.pt epochs=100 imgsz=640 batch=16 name=blueboat_detector
+```
+
+`ShapeTargetDetector`'s `DEFAULT_WEIGHTS_PATH` expects the result at
+`runs/detect/blueboat_detector/weights/best.pt` (Ultralytics' own default
+output path for that `name=`), so no code changes are needed after
+retraining.
+
+### Running the live test
+
+With a trained model at the path above, `--spawn-boat` alone is enough to
+see it work (no SITL/mission container needed — this just drives the camera
+agent directly and shows detections):
+
+```bash
+cd aircraft/aircraft_resources/missions
+
+# Static hover directly over the boat
+python3 biguasim_sim_runner.py --viewport --show-camera \
+  --spawn-boat --landing-target none --location 33 0 6
+
+# Or a continuous all-around look instead of one fixed angle
+python3 biguasim_sim_runner.py --viewport --show-camera \
+  --spawn-boat --landing-target none --orbit
+```
+
+`--show-camera` opens a `cv2.imshow` window with the live detection overlay
+(green box + confidence). For the full mission (takeoff, fly to the boat,
+center, land), run `vision_detect_boat_test.yaml` (detection only) or
+`vision_land_boat_test.yaml` (detection + landing) via the three-terminal
+flow in "How to run" above, with `biguasim_sim_runner.py` started using the
+same `--spawn-boat --landing-target none` flags.
 
 ## Bugs found during end-to-end validation
 
@@ -218,3 +354,8 @@ here because they blocked getting a real BiguaSim/ArduPilot run to complete.
   takeoff, fly-to-waypoint, GPS-free descent to water, `AQUATIC_NAV`
   detection, ascend back over the bridge deck, GPS return, and landing on the
   platform all completed successfully, matching the originally recorded demo.
+- The custom-trained YOLOv8n BlueBoat detector (see "Precision-landing
+  vision" above), confirmed live against the real simulator with
+  `--spawn-boat --landing-target none --show-camera`: correctly tracks the
+  boat's built-in helipad marking across distance/angle, including on the
+  exact water-glint frame that used to trip up the classical CV detector.

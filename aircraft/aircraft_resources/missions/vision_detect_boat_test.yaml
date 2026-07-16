@@ -7,14 +7,23 @@ steps:
     params:
       takeoff_altitude: 8.0
 
-  # Reuses the exact north/east offset already validated by t2_land_test.yaml
-  # (bsim_x = spawn_x(8) + 17 = 25), matching the BlueBoat's spawn location in
-  # biguasim_sim_runner.py's --landing-target boat mode.
+  # bsim_x = spawn_x(8) + 25 = 33, matching BOAT_LOCATION in
+  # biguasim_sim_runner.py (offset from bluerov0's x=25 so they don't overlap).
   - action: go_to_known_gps_waypoint
     params:
-      north: 17.0
+      north: 25.0
       east: 0.0
       altitude: 8.0
+
+  # go_to_known_gps_waypoint above only *sends* the fly-to command and advances
+  # immediately (it doesn't wait for arrival) — confirm the drone is actually
+  # at the boat's xy before starting the long hover/observe window below, same
+  # pattern t2_land_test.yaml uses for its own return-to-platform leg.
+  - action: wait_to_reach_position
+    params:
+      north: 25.0
+      threshold: 2.0
+      timeout: 120.0
 
   # Hover over the boat — plenty of time to watch detections come in.
   - action: wait
