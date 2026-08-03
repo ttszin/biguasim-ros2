@@ -99,6 +99,22 @@ class MissionNode(Node):
         # may not fire in BiguaSim when landing on a rigid platform in direct LAND mode).
         self.land_alt_prev = None
         self.land_alt_stable_start = None
+        # Vertical velocity target magnitude (m/s) for descend_to_water/ascend_from_water/
+        # ascend_to_altitude. All three now command this through SetReposition's
+        # altitude>10 GPS-free velocity branch (ardupilot_interface.cpp's
+        # vertical_velocity field), not descend_to_water's old altitude<-1 branch
+        # (a hardcoded, unrampable -2.0 m/s) — see _ramped_vertical_velocity below
+        # for why: that branch has no variable-velocity field to ramp.
+        self.VERTICAL_VEL_MPS = 2.0
+        # Commanding the full target velocity in a single instantaneous step (the
+        # previous behavior) is a hard step input to the position/attitude
+        # controller — measured (see log_hover_stability.py) to excite a bigger
+        # attitude transient than ramping the same step up linearly over this
+        # window. Resent at RAMP_RESEND_SEC during the ramp itself (instead of
+        # the steady-state 10s keep-alive cadence below), then falls back to
+        # that same 10s cadence once at full target velocity.
+        self.VERTICAL_VEL_RAMP_DURATION_SEC = 1.5
+        self.VERTICAL_VEL_RAMP_RESEND_SEC = 0.2
         # descend_to_water: vel.z=-2 m/s (GPS-free) until AQUATIC_NAV, then auto-float
         self.descend_to_water_active = False
         self.descend_to_water_start = None
@@ -472,6 +488,24 @@ class MissionNode(Node):
         except Exception as e:
             self.get_logger().error(f'Service call failed (no-advance): {e}')
 
+    def _ramped_vertical_velocity(self, elapsed_since_active: float) -> float:
+        """Positive-magnitude vertical velocity, linearly ramped from 0 up to
+        self.VERTICAL_VEL_MPS over self.VERTICAL_VEL_RAMP_DURATION_SEC — the
+        caller applies the sign (negative for descend, positive for ascend).
+        """
+        if self.VERTICAL_VEL_RAMP_DURATION_SEC <= 0.0:
+            return self.VERTICAL_VEL_MPS
+        progress = min(1.0, elapsed_since_active / self.VERTICAL_VEL_RAMP_DURATION_SEC)
+        return self.VERTICAL_VEL_MPS * progress
+
+    def _vertical_velocity_resend_interval(self, elapsed_since_active: float) -> float:
+        """RAMP_RESEND_SEC while still ramping (needs frequent updates to actually
+        shape the ramp), then the same 10s keep-alive cadence as before once at
+        full target velocity (GUID_TIMEOUT is 15s — see t2_biguasim.parm)."""
+        if elapsed_since_active < self.VERTICAL_VEL_RAMP_DURATION_SEC:
+            return self.VERTICAL_VEL_RAMP_RESEND_SEC
+        return 10.0
+
     def service_response_callback(self, future):
         try:
             response = future.result()
@@ -598,7 +632,10 @@ class MissionNode(Node):
                     self.land_complete_waiting = False
             return
 
-        # descend_to_water: re-send vel.z=-2 every 10s to keep GUID_TIMEOUT alive.
+        # descend_to_water: ramp vel.z from 0 to -VERTICAL_VEL_MPS (see
+        # _ramped_vertical_velocity), then keep-alive every 10s. Uses the same
+        # altitude>10 GPS-free velocity branch as ascend (not altitude<-1's old
+        # hardcoded -2.0 m/s, which has no variable-velocity field to ramp).
         # mission_step advance happens in nav_mode_callback when AQUATIC_NAV fires.
         if self.descend_to_water_active:
             elapsed = (self.get_clock().now() - self.descend_to_water_start).nanoseconds / 1e9
@@ -609,17 +646,19 @@ class MissionNode(Node):
                 self.mission_step = -1
                 return
             last_send_elapsed = (self.get_clock().now() - self.descend_to_water_last_send).nanoseconds / 1e9
-            if last_send_elapsed >= 10.0:
+            if last_send_elapsed >= self._vertical_velocity_resend_interval(elapsed):
+                vel = self._ramped_vertical_velocity(elapsed)
                 req = SetReposition.Request()
                 req.north = 0.0
                 req.east = 0.0
-                req.altitude = -10.0  # < -1 → vel.z = -2 m/s (GPS-free descent)
+                req.altitude = 15.0  # > 10 → GPS-free velocity mode
+                req.vertical_velocity = -vel
                 self._call_service_no_advance(self._reposition_client, req)
                 self.descend_to_water_last_send = self.get_clock().now()
-                self.get_logger().info("descend_to_water: re-sending descent command.")
+                self.get_logger().info(f"descend_to_water: re-sending descent command ({vel:.2f} m/s).")
             return
 
-        # ascend_from_water: re-send vel.z=+2 every 10s to keep GUID_TIMEOUT alive.
+        # ascend_from_water: ramp vel.z from 0 to +VERTICAL_VEL_MPS, then keep-alive every 10s.
         # mission_step advance happens in nav_mode_callback when AERIAL_NAV fires.
         if self.ascend_from_water_active:
             elapsed = (self.get_clock().now() - self.ascend_from_water_start).nanoseconds / 1e9
@@ -630,15 +669,16 @@ class MissionNode(Node):
                 self.mission_step = -1
                 return
             last_send_elapsed = (self.get_clock().now() - self.ascend_from_water_last_send).nanoseconds / 1e9
-            if last_send_elapsed >= 10.0:
+            if last_send_elapsed >= self._vertical_velocity_resend_interval(elapsed):
+                vel = self._ramped_vertical_velocity(elapsed)
                 req = SetReposition.Request()
                 req.north = 0.0
                 req.east = 0.0
-                req.altitude = 15.0  # > 10 → vel.z = +2 m/s (GPS-free ascent)
-                req.vertical_velocity = 2.0
+                req.altitude = 15.0  # > 10 → vel.z = +vel (GPS-free ascent)
+                req.vertical_velocity = vel
                 self._call_service_no_advance(self._reposition_client, req)
                 self.ascend_from_water_last_send = self.get_clock().now()
-                self.get_logger().info("ascend_from_water: re-sending ascent command.")
+                self.get_logger().info(f"ascend_from_water: re-sending ascent command ({vel:.2f} m/s).")
             return
 
         if self.ascend_to_alt_active:
@@ -657,18 +697,21 @@ class MissionNode(Node):
                     self.ascend_to_alt_active = False
                     self.mission_step = -1
                     return
+            else:
+                elapsed = (self.get_clock().now() - self.ascend_to_alt_start).nanoseconds / 1e9
             last_send_elapsed = (self.get_clock().now() - self.ascend_to_alt_last_send).nanoseconds / 1e9
-            if last_send_elapsed >= 10.0:
+            if last_send_elapsed >= self._vertical_velocity_resend_interval(elapsed):
+                vel = self._ramped_vertical_velocity(elapsed)
                 req = SetReposition.Request()
                 req.north = 0.0
                 req.east = 0.0
                 req.altitude = 15.0
-                req.vertical_velocity = 2.0
+                req.vertical_velocity = vel
                 self._call_service_no_advance(self._reposition_client, req)
                 self.ascend_to_alt_last_send = self.get_clock().now()
                 alt_str = f"{current_alt:.1f}" if current_alt is not None else "N/A"
                 self.get_logger().info(
-                    f"ascend_to_altitude: re-sending vel.z+2 (alt={alt_str} MSL, target={self.ascend_to_alt_target_msl:.1f}).")
+                    f"ascend_to_altitude: re-sending vel.z+{vel:.2f} (alt={alt_str} MSL, target={self.ascend_to_alt_target_msl:.1f}).")
             return
 
         if self.vision_land_active:
@@ -888,7 +931,8 @@ class MissionNode(Node):
             req = SetReposition.Request()
             req.north = 0.0
             req.east = 0.0
-            req.altitude = -10.0  # altitude < -1 → vel.z=-2 m/s, GPS-free descent
+            req.altitude = 15.0  # > 10 → GPS-free velocity mode (ramped, see _ramped_vertical_velocity)
+            req.vertical_velocity = 0.0  # t=0 of the ramp
             # Use no-advance: mission_step is advanced by nav_mode_callback when AQUATIC_NAV fires,
             # not by service_response_callback (which would cause a double-increment).
             self._call_service_no_advance(self._reposition_client, req)
@@ -896,21 +940,23 @@ class MissionNode(Node):
             self.descend_to_water_start = self.get_clock().now()
             self.descend_to_water_last_send = self.get_clock().now()
             self.descend_to_water_timeout = timeout
-            self.get_logger().info(f"descend_to_water: descending at 2 m/s until AQUATIC_NAV (timeout={timeout}s).")
+            self.get_logger().info(
+                f"descend_to_water: ramping to {self.VERTICAL_VEL_MPS} m/s descent until AQUATIC_NAV (timeout={timeout}s).")
 
         elif action_type == 'ascend_from_water':
             timeout = float(params.get('timeout', 120.0))
             req = SetReposition.Request()
             req.north = 0.0
             req.east = 0.0
-            req.altitude = 15.0  # > 10 → vel.z = +2 m/s, GPS-free ascent
-            req.vertical_velocity = 2.0
+            req.altitude = 15.0  # > 10 → GPS-free velocity mode (ramped, see _ramped_vertical_velocity)
+            req.vertical_velocity = 0.0  # t=0 of the ramp
             self._call_service_no_advance(self._reposition_client, req)
             self.ascend_from_water_active = True
             self.ascend_from_water_start = self.get_clock().now()
             self.ascend_from_water_timeout = timeout
             self.ascend_from_water_last_send = self.get_clock().now()
-            self.get_logger().info(f"ascend_from_water: ascending at 2 m/s until AERIAL_NAV (timeout={timeout}s).")
+            self.get_logger().info(
+                f"ascend_from_water: ramping to {self.VERTICAL_VEL_MPS} m/s ascent until AERIAL_NAV (timeout={timeout}s).")
 
         elif action_type == 'ascend_to_altitude':
             target_msl = float(params.get('altitude_msl', 575.0))
@@ -925,7 +971,7 @@ class MissionNode(Node):
             req.north = 0.0
             req.east = 0.0
             req.altitude = 15.0
-            req.vertical_velocity = 2.0
+            req.vertical_velocity = 0.0  # t=0 of the ramp
             self._call_service_no_advance(self._reposition_client, req)
             self.ascend_to_alt_active = True
             self.ascend_to_alt_target_msl = target_msl
@@ -934,7 +980,7 @@ class MissionNode(Node):
             self.ascend_to_alt_last_send = self.get_clock().now()
             alt_str = f"{current_alt:.1f}" if current_alt is not None else "N/A"
             self.get_logger().info(
-                f"ascend_to_altitude: ascending to {target_msl:.1f} MSL (current {alt_str}).")
+                f"ascend_to_altitude: ramping to {target_msl:.1f} MSL (current {alt_str}).")
 
         elif action_type == 'vision_land':
             self.vision_land_target_class_id = str(params.get('target_class_id', 'shape_target'))

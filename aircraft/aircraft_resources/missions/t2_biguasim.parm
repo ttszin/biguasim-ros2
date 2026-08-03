@@ -52,3 +52,46 @@ FS_EKF_ACTION 0
 # Relax innovation check scale from default 100 to 200 so transient GPS artifacts
 # (bridge-deck crossing, SITL GPS lock settling) don't trip the EKF health flag.
 EK3_CHECK_SCALE 200
+
+# GCS/heartbeat failsafe off. Confirmed live: a MAVROS "HEARTBEAT timed out"
+# (host CPU contention from running BiguaSim + ArduCopter SITL + the Humble
+# container together, made worse by concurrent diagnostic `docker exec` calls
+# during a run) triggered ArduCopter's default GCS-failsafe RTL mid-mission —
+# not a real link loss, a false positive from a momentarily busy host. Same
+# rationale as FS_EKF_ACTION above: disable the SITL-only failure mode instead
+# of chasing host timing.
+FS_GCS_ENABLE 0
+
+# RC/throttle failsafe off, same rationale as FS_GCS_ENABLE just above: added
+# after FS_GCS_ENABLE 0 alone did NOT stop a second live RTL (still saw
+# "HEARTBEAT timed out" + mode: RTL) — NOT yet confirmed live whether this was
+# the actual second cause or whether FS_GCS_ENABLE simply hadn't taken effect
+# (the verification check hung before it could be confirmed either way). No
+# real RC transmitter exists in this SITL setup, so this failsafe can never
+# fire for a legitimate reason here.
+FS_THR_ENABLE 0
+
+# Scheduler's own expected loop rate — SEPARATE parameter from SIM_RATE_HZ
+# (set via t2_sitl_run.sh's -A "--rate ..."), confirmed by reading
+# AP_Arming.cpp's "Main loop slow" check directly: it compares against
+# AP::scheduler().get_loop_rate_hz(), which reads THIS param
+# (AP_Scheduler.cpp's "LOOP_RATE" GROUPINFO, default 400 — SCHEDULER_DEFAULT_
+# LOOP_RATE), not SIM_RATE_HZ. Setting only SIM_RATE_HZ did NOT clear the
+# "Main loop slow" warning live — confirmed the two rates are independent,
+# both need to match BiguaSim's real delivery rate.
+#
+# 200 (biguasim_sim_runner.py's --ticks default / -TicksPerSec=200) is only
+# BiguaSim's REQUESTED tick rate, not what it actually sustains: confirmed
+# live the real delivered rate is ~133Hz — identically, with AND without
+# --viewport (so it's not rendering/GPU load; more likely the Python/PyTorch
+# dynamics step itself, or the UDP lockstep round-trip), and stable across
+# very different GPU temperatures (65°C vs 86°C) — a real, roughly-fixed
+# throughput ceiling for this machine, not a moving thermal-throttling
+# target like the 150Hz attempt looked like at first. Set to 120 (margin
+# under the observed ~133Hz, since arming requires actual >= 90% of this
+# value) —
+# must be changed together with t2_sitl_run.sh's -A "--rate ..." if this
+# machine's real achievable rate turns out to be different, or if
+# --viewport is ever dropped (headless likely sustains a higher real rate,
+# since it skips rendering — hasn't been measured).
+SCHED_LOOP_RATE 120

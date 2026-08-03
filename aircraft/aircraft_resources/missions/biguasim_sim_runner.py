@@ -144,7 +144,6 @@ class BiguaSimT2Runner(ArduBiguaSimRunner):
                  bridge_host: str = "127.0.0.1",
                  telemetry_port: int = 9100,
                  rov_cmd_port: int = 9101,
-                 landing_target_location: list | None = None,
                  boat_agent: str | None = None,
                  boat_hold: list | None = None,
                  show_camera: bool = False,
@@ -157,7 +156,6 @@ class BiguaSimT2Runner(ArduBiguaSimRunner):
         self._rov_agent_name = rov_agent
         self._rov_hold = (rov_hold or [25.0, 0.0, -0.5]) + [0.0]
         self._rov_cmd_ros: list | None = None
-        self._landing_target_location = landing_target_location
         # Stationary BlueBoat landing platform (no ArduPilot/SITL of its own — driven
         # directly via cmd_pos_yaw, same non-SITL pattern as the bluerov0 agent).
         self._boat_agent_name = boat_agent
@@ -508,19 +506,6 @@ class BiguaSimT2Runner(ArduBiguaSimRunner):
         rov_cmd = self._rov_hold
         env.step(self._step_cmds(motor_cmds, rov_cmd))
 
-        if self._landing_target_location is not None:
-            # Synthetic vision_land target for the --landing-target
-            # platform/boat paths (spawn_prop only supports basic shapes/
-            # materials — no way to apply a custom ArUco texture via the
-            # Python API; that would need placing a marker manually in the
-            # Unreal Editor). NOT detected by BoatSilhouetteDetector (which
-            # looks for the real BlueBoat hull's saturation signature, not a
-            # synthetic sphere) — this path matters only for --landing-target
-            # platform/boat, not the current --landing-target none --spawn-boat
-            # whole-hull testing.
-            env.spawn_prop("sphere", location=self._landing_target_location, scale=0.5,
-                            material="gold", tag="landing_target")
-
         if self._spawn_location is not None:
             env._agent.teleport(location=np.array(self._spawn_location, dtype=np.float32))
             env.step(self._step_cmds(motor_cmds, rov_cmd))
@@ -619,19 +604,13 @@ def main() -> None:
              "detection overlays (ArUco/color-target bounding boxes + image center).",
     )
     parser.add_argument(
-        "--landing-target", choices=["platform", "boat", "none"], default="platform",
-        help="Where to spawn a synthetic (sphere) vision_land target: on the takeoff "
-             "platform (default, matches vision_land_test.yaml), on the BlueBoat out on "
-             "the water (matches vision_land_boat_test.yaml), or nowhere (--landing-target "
-             "none — e.g. when relying on the BlueBoat's own built-in helipad marking, or "
-             "a real ArUco marker placed manually in the Unreal Editor, instead).",
-    )
-    parser.add_argument(
         "--spawn-boat", action="store_true",
-        help="Spawn the stationary BlueBoat out on the water, independent of "
-             "--landing-target (the BlueBoat model has its own built-in helipad "
-             "marking — no synthetic target needed on top of it). Implied by "
-             "--landing-target boat.",
+        help="Spawn the stationary BlueBoat out on the water — its own built-in "
+             "helipad marking (square deck, circle+cross touchdown mark) is what "
+             "ShapeTargetDetector's trained YOLO model detects, no synthetic "
+             "target needed. (A synthetic gold-sphere target used to be spawnable "
+             "here via a --landing-target flag; removed since the trained "
+             "detector only recognizes the real BlueBoat shape, never a sphere.)",
     )
     parser.add_argument(
         "--boat-z", type=float, default=0.2,
@@ -733,26 +712,12 @@ def main() -> None:
         "configuration": {"CaptureWidth": CAMERA_WIDTH, "CaptureHeight": CAMERA_HEIGHT},
     })
 
-    # Landing target for vision_land. "platform": on top of the takeoff/landing
-    # platform, i.e. right at the agent's spawn location (small z offset to sit
-    # above the deck) — matches vision_land_test.yaml. "boat": on a stationary
-    # BlueBoat out on the water — matches vision_land_boat_test.yaml.
     # x=33 (8m further north than bluerov0's x=25, same y=0) so the two agents
     # don't spawn on top of each other; stays on the already-validated north
     # axis (bsim_x = spawn_x(8) + north) instead of guessing BiguaSim's NWU
     # east/west (y) sign convention. Matching mission waypoint: north=25.
     BOAT_LOCATION = [33.0, 0.0, args.boat_z]  # bluerov0 floats separately at [25.0, 0.0, -0.5]
-    # Spawning the boat is decoupled from the synthetic target: the BlueBoat model
-    # has its own built-in helipad marking (square deck, circle+cross touchdown
-    # mark) — use --spawn-boat --landing-target none to rely on that instead of
-    # also placing a sphere on top of it.
-    boat_agent = "blueboat0" if (args.spawn_boat or args.landing_target == "boat") else None
-    if args.landing_target == "platform":
-        landing_target_location = [args.location[0], args.location[1], args.location[2] + 0.1]
-    elif args.landing_target == "boat":
-        landing_target_location = [BOAT_LOCATION[0], BOAT_LOCATION[1], BOAT_LOCATION[2] + 0.4]  # above the ~0.376m-tall deck
-    else:
-        landing_target_location = None
+    boat_agent = "blueboat0" if args.spawn_boat else None
 
     scenario["agents"].append({
         "agent_name": "bluerov0",
@@ -795,7 +760,6 @@ def main() -> None:
         bridge_host=args.bridge_host,
         telemetry_port=args.telemetry_port,
         rov_cmd_port=args.rov_cmd_port,
-        landing_target_location=landing_target_location,
         boat_agent=boat_agent,
         boat_hold=BOAT_LOCATION if boat_agent is not None else None,
         show_camera=args.show_camera,

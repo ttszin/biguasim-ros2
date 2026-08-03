@@ -20,12 +20,13 @@ steps:
   # --- PHASE 3: Center on the landing target using vision, then descend ---
   # Target: the BlueBoat's own built-in helipad marking (square deck, circle+
   # cross touchdown mark), detected by marker_detector.py's ShapeTargetDetector
-  # (class_id "shape_target", circularity-based on the inner circle, lighting-
-  # independent) — run with --spawn-boat --landing-target none, no synthetic
-  # target needed. Switch target_class_id to "aruco_<id>" if an ArUco marker
-  # was placed manually on the boat in the Unreal Editor instead. The boat
-  # does not move during this test (see plan notes) — tracking through a
-  # moving target's final touchdown is not implemented yet.
+  # (class_id "shape_target", now backed by a custom-trained YOLOv8n model —
+  # see biguasim_bridge/README.md's "Precision-landing vision" section) — run
+  # with --spawn-boat, no synthetic target needed. Switch target_class_id to
+  # "aruco_<id>" if an ArUco marker was placed manually on the boat in the
+  # Unreal Editor instead. The boat does not move during this test (see plan
+  # notes) — tracking through a moving target's final touchdown is not
+  # implemented yet.
   - action: vision_land
     params:
       target_class_id: shape_target

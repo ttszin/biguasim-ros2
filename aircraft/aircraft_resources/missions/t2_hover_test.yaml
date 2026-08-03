@@ -3,6 +3,34 @@ steps:
     params:
       takeoff_altitude: 5.0
 
+  # north=17 reuses the exact waypoint already validated by t2_land_test.yaml
+  # (bsim_x = spawn_x(8) + 17 = 25) — a real transit away from the spawn point,
+  # not just holding position exactly at home, so this actually exercises
+  # GUIDED position hold rather than a trivial zero-error case.
+  #
+  # Deliberately mirrors t2_land_test.yaml's own PHASE 2 exactly (already
+  # validated, right after takeoff): go_to_known_gps_waypoint + a fixed wait,
+  # NOT wait_to_reach_position. wait_to_reach_position itself isn't buggy (it
+  # IS used successfully in t2_land_test.yaml — see its PHASE 5), but only
+  # late in that mission, several minutes in, after the EKF/link has had a
+  # long flight to settle. Using it here, immediately after the very first
+  # takeoff, kept the mission actively polling/GUIDED-navigating through
+  # exactly the fragile early-flight window where arming itself was already
+  # observed to take a while to stabilize — live testing repeatedly hit an
+  # ArduCopter-native RTL failsafe during that early window. Matching the
+  # already-proven early-mission shape here removes that as a variable.
+  - action: go_to_known_gps_waypoint
+    params:
+      north: 17.0
+      east: 0.0
+      altitude: 5.0
+
+  # Hover in place — run log_hover_stability.py in a separate terminal during
+  # this window (see biguasim_bridge/README.md's "Hover stability..." section).
+  # 20s settle (matching t2_land_test.yaml's own post-waypoint wait exactly)
+  # is folded into the 180s below rather than kept separate, since this step
+  # doesn't need to distinguish "still traveling" from "hovering" the way
+  # log_hover_stability.py's own --settle flag already does.
   - action: wait
     params:
       duration: 180.0
