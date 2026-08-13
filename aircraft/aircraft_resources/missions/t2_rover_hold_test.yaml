@@ -1,0 +1,27 @@
+steps:
+  # "takeoff" here means arm + enter GUIDED — reused from the Multicopter action
+  # type (ardupilot_interface.cpp's mav_type_==10 branch treats it that way; no
+  # new action/message type needed). takeoff_altitude is ignored for Rover (no
+  # altitude axis) — set to 0.0 for clarity, not because it does anything.
+  - action: takeoff
+    params:
+      takeoff_altitude: 0.0
+
+  # Same GlobalPositionTarget/GUIDED mechanism as t2_hover_test.yaml's waypoint
+  # step — a real transit away from the spawn point (north=5, modest since the
+  # BlueBoat's water area is smaller than the aerial one used by the DjiMatrice
+  # tests), not just holding position exactly where it spawned. altitude is
+  # ignored by Rover firmware.
+  - action: go_to_known_gps_waypoint
+    params:
+      north: 5.0
+      east: 0.0
+      altitude: 0.0
+
+  # Hold in place — run log_hover_stability.py in a separate terminal during
+  # this window, same as t2_hover_test.yaml. No explicit disarm/land step: this
+  # test only needs to measure position-hold stability, and Rover has no
+  # land-equivalent FSM path implemented yet (see biguasim_bridge/README.md).
+  - action: wait
+    params:
+      duration: 180.0

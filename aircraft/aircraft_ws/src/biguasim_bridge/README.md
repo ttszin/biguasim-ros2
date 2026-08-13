@@ -559,6 +559,155 @@ at the transition instant with/without the ramp. If it doesn't measurably
 help, the added complexity should come back out rather than being kept on
 faith.
 
+## Position-hold stability for other BiguaSim vehicles: BlueBoat (Rover)
+
+**Status: confirmed live, working end to end.** The hover-stability work above
+only ever validated the DjiMatrice (ArduCopter). Extending the same
+measurement to BiguaSim's other vehicle profiles turned out to need real new
+code, not just a re-run: `ardupilot_interface.cpp` had **zero** existing
+handling for `MAV_TYPE_GROUND_ROVER`/`MAV_TYPE_SUBMARINE` — every `mav_type_`
+branch in the file only ever checked for `1` (fixed-wing/VTOL) or `2`
+(Multicopter), several with **no default case**, meaning an unhandled
+`mav_type_` silently hung forever instead of failing. Given the size of
+supporting all four non-Copter profiles (BlueROV2/BlueROVHeavy/TorpedoAUV on
+ArduSub, BlueBoat on Rover — two new firmware types, missing `.parm` files,
+no multi-instance-SITL convention), scope was deliberately narrowed to the
+simplest one first: **BlueBoat (Rover)** — no vertical axis, no
+submersion/buoyancy semantics, just 2D position hold on the water surface.
+
+### What was built
+
+- `t2_sitl_run_blueboat.sh` (new) — launches Rover SITL (`sim_vehicle.py -v
+  Rover --model JSON`), mirroring `t2_sitl_run.sh`. No `-A "--rate ..."`
+  override, unlike the ArduCopter script: confirmed in
+  `ardupilot/libraries/AP_Scheduler/AP_Scheduler.cpp:44-47` that
+  `SCHEDULER_DEFAULT_LOOP_RATE` is conditionally 400 for Copter/Heli/ArduSub
+  but **50 for Rover** — already comfortably below BiguaSim's real delivery
+  rate, so the loop-rate mismatch that broke DjiMatrice arming doesn't apply.
+- `t2_biguasim_blueboat.parm` (new) — starts empty, same iterative philosophy
+  as `t2_biguasim.parm` originally did (add a parameter only once a live run
+  shows a concrete need for it).
+- `biguasim_sim_runner_blueboat.py` (new) — standalone script that runs the
+  BlueBoat as the actual ArduPilot-bridged vehicle (`control_abstraction:
+  "cmd_motor_speeds"`, per `VEHICLE_REGISTRY["BlueBoat"]`), unlike
+  `biguasim_sim_runner.py`'s own `blueboat0` agent, which is a decorative,
+  non-SITL `cmd_pos_yaw`-controlled landing-target prop. No subclassing
+  needed — `ArduBiguaSimRunner`'s base `run()` loop is already fully
+  vehicle-agnostic (see its own module docstring in
+  `biguasim/src/biguasim/ardubridge/runner.py`).
+- `ardupilot_interface.cpp`: a new `mav_type_ == 10` branch in
+  `takeoff_handle_accepted`, added *alongside* the existing Multicopter/VTOL
+  branches, not replacing them — reuses the `Takeoff` action/message as-is
+  (Rover has no real "takeoff", so this branch just arms and enters GUIDED,
+  then declares the action complete; `takeoff_altitude` is accepted but
+  ignored). Also widened `set_reposition_callback`'s guard to accept
+  `mav_type_==10` (reusing `ARMED` as Rover's "ready" state — safe to share
+  with the Multicopter path since `mav_type_` is fixed for the life of one
+  node/one SITL session) and its existing `GlobalPositionTarget`/GUIDED
+  branch, which Rover firmware simply ignores the altitude field of. Added an
+  explicit `else` for genuinely unsupported `mav_type_` values, so a future
+  untested vehicle type fails loudly instead of hanging.
+- `mission_node.py`: `go_to_known_gps_waypoint`'s `DRONE_TYPE` gate widened
+  from `'quad'`-only to `('quad', 'rover')`.
+- `t2_aircraft.yml.erb`: new `T2_DRONE_TYPE` env var (defaults to `'quad'`,
+  same `ENV.fetch` pattern as `T2_CONOPS`), threaded into the mission
+  process's `DRONE_TYPE` env var.
+- `t2_rover_hold_test.yaml` (new) — `takeoff` (arm+GUIDED, reused) →
+  `go_to_known_gps_waypoint` (north=5, small since the water area is
+  narrower than the aerial one) → `wait` 180s. No disarm/land step: Rover has
+  no land-equivalent FSM path yet, and it isn't needed to measure hold
+  stability.
+- `log_hover_stability.py` needed **no changes at all** — already fully
+  vehicle-agnostic (just reads `/mavros/local_position/odom` +
+  `/mavros/imu/data`).
+
+### Three more infrastructure bugs found live (none in the new Rover logic itself)
+
+1. **Rover never reports `MAV_STATE_STANDBY` (3).** Confirmed live:
+   `mode: MANUAL`, `system_status: 4` (ACTIVE) from startup, disarmed — Rover
+   firmware doesn't have Copter's distinct "standby until armed" state. This
+   silently blocked mission start twice: `t2_aircraft.yml.erb`'s own
+   `until ... system_status: 3` gate (widened to `system_status: (3|4)`), and
+   `takeoff_handle_goal`'s `if (mav_state_ != 3) reject` (widened to also
+   accept `mav_type_==10 && mav_state_==4`).
+2. **`mav_type_` would never get populated for Rover at all.**
+   `ardupilot_interface_printout_callback`'s one-time `VehicleInfoGet` query
+   (the *only* place `mav_type_` is ever set, from its initial `-1`) was
+   gated on the same `mav_state_ == 3` — same fix, widened to `3 || 4`.
+   Without this, every `mav_type_`-gated branch in the file, including the
+   new Rover one, would never execute regardless of the other two fixes.
+3. **New mission YAML wasn't visible inside the container.** `docker run`
+   only had `t2_aircraft.yml.erb` and the two edited ROS2 package `src/`
+   dirs volume-mounted — `aircraft_resources/missions/` (where
+   `t2_rover_hold_test.yaml` lives) is otherwise baked into the image at
+   build time, so a brand-new file there is invisible until the image is
+   rebuilt. `mission_node.py` failed to load it, silently fell back to an
+   empty mission plan, and immediately logged "Mission Complete" with zero
+   steps executed — nothing about this looked like a missing-file error at a
+   glance. Fixed by also mounting `aircraft_resources/missions/` for testing
+   against source that hasn't been baked into the image yet (see "How to
+   test" below).
+
+### Real baseline result
+
+180s hold, 20s settle excluded, 1601 samples
+(`blueboat_hold_baseline.csv` in the repo root):
+
+| Metric | Result | Same criteria as DjiMatrice |
+|---|---|---|
+| Horizontal position stddev | **0.001 m** | < 0.3 m |
+| Vertical position stddev | **0.015 m** | < 0.15 m |
+| Peak \|roll\| | **0.16°** | < 3° |
+| Peak \|pitch\| | **0.15°** | < 3° |
+
+Passes comfortably on all four — vertical stability is noticeably better than
+the DjiMatrice's (0.015 m vs 0.199 m), consistent with a boat on a water
+surface not needing to fight gravity/thrust balance the way a hovering
+multirotor does.
+
+### How to test
+
+Same three-terminal shape as the DjiMatrice tests, but note the extra volume
+mounts (source hasn't been rebuilt into the image yet) and the explicit
+rebuild step:
+
+```bash
+# Terminal 1
+bash aircraft/aircraft_resources/missions/t2_sitl_run_blueboat.sh
+
+# Terminal 2
+python3 aircraft/aircraft_resources/missions/biguasim_sim_runner_blueboat.py --viewport
+
+# Terminal 3
+docker run --rm -it --network host \
+  -e T2_CONOPS=/aas/aircraft_resources/missions/t2_rover_hold_test.yaml \
+  -e T2_DRONE_TYPE=rover \
+  -v $(pwd)/aircraft/t2_aircraft.yml.erb:/aas/t2_aircraft.yml.erb \
+  -v $(pwd)/aircraft/aircraft_ws/src/autopilot_interface:/aas/aircraft_ws/src/autopilot_interface \
+  -v $(pwd)/aircraft/aircraft_ws/src/mission:/aas/aircraft_ws/src/mission \
+  -v $(pwd)/aircraft/aircraft_resources/missions:/aas/aircraft_resources/missions \
+  --entrypoint bash aircraft-image \
+  -c "source /opt/ros/humble/setup.bash && cd /aas/aircraft_ws && colcon build --packages-select autopilot_interface mission && source install/setup.bash && tmuxinator start -p /aas/t2_aircraft.yml.erb"
+
+# logger, inside the container once armed (docker cp it in first, same as the ramp A/B test method above)
+```
+
+Once this Rover work is merged into a fresh image build, the extra
+`autopilot_interface`/`mission`/`aircraft_resources/missions` volume mounts
+and manual rebuild step are no longer needed — same one-line `docker run`
+as the DjiMatrice flow.
+
+### Out of scope for this round
+
+BlueROV2, BlueROVHeavy, TorpedoAUV (all ArduSub) — deliberately deferred:
+depth axis, no real GPS underwater, submersion semantics, and missing
+`.parm` files (`bluerov2.parm`/`bluerovheavy.parm`/`torpedo.parm` are
+referenced in BiguaSim's `vehicle.py` but don't exist anywhere in either
+repo) make this meaningfully harder than Rover. This Rover path — a new
+`mav_type_` branch added alongside the existing ones, `ARMED` reused as the
+"ready" state, `Takeoff` reused rather than inventing a new action — is
+intended as the template for that follow-up work.
+
 ## Bugs found during end-to-end validation
 
 None of these were introduced by the Humble port itself — they were latent
@@ -660,3 +809,9 @@ here because they blocked getting a real BiguaSim/ArduPilot run to complete.
   a minute, flew to the waypoint, held a 180s hover (horizontal position
   stddev 0.000 m, vertical 0.199 m, peak roll/pitch under 0.1°), and landed
   cleanly back at the spawn point — no RTL failsafe, no manual intervention.
+- Full `t2_rover_hold_test.yaml` run against real BiguaSim + ArduPilot Rover
+  SITL (see "Position-hold stability for other BiguaSim vehicles" above): the
+  BlueBoat armed, drove to its waypoint, and held a 180s position hold
+  (horizontal position stddev 0.001 m, vertical 0.015 m, peak roll/pitch
+  under 0.2°) — first confirmation that the ArduCopter-only ROS2 bridge
+  (`ardupilot_interface.cpp`) also works for a Rover vehicle.

@@ -15,6 +15,9 @@
 
   drone_id = ENV.fetch('DRONE_ID', 0).to_i
   conops = ENV.fetch('T2_CONOPS', '/aas/aircraft_resources/missions/t2_land_test.yaml')
+  # 'quad' (default, DjiMatrice/ArduCopter) or 'rover' (BlueBoat/Rover position-hold
+  # test — see t2_rover_hold_test.yaml + ardupilot_interface.cpp's mav_type_==10 path).
+  drone_type = ENV.fetch('T2_DRONE_TYPE', 'quad')
 %>
 
 name: t2_bridge
@@ -45,6 +48,6 @@ windows:
       panes:
         - >
           until ros2 topic echo /mavros/state --once 2>/dev/null | grep -q "connected: true"; do sleep 1; done &&
-          until ros2 topic echo /mavros/state --once 2>/dev/null | grep -q "system_status: 3"; do sleep 1; done &&
-          echo "FCU in standby, starting mission." &&
-          DRONE_TYPE=quad DRONE_ID=<%= drone_id %> ros2 run mission mission --conops <%= conops %> --ros-args -r __ns:=/Drone<%= drone_id %>
+          until ros2 topic echo /mavros/state --once 2>/dev/null | grep -qE "system_status: (3|4)"; do sleep 1; done &&
+          echo "FCU ready, starting mission." &&
+          DRONE_TYPE=<%= drone_type %> DRONE_ID=<%= drone_id %> ros2 run mission mission --conops <%= conops %> --ros-args -r __ns:=/Drone<%= drone_id %>

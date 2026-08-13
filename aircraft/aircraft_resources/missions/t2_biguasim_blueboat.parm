@@ -1,0 +1,7 @@
+# BiguaSim BlueBoat (Rover) SITL overrides — ArduPilot NAME VALUE format (2-column)
+#
+# Deliberately starts empty/minimal, unlike t2_biguasim.parm (DjiMatrice) which
+# accumulated its tuning over many live SITL runs. Same iterative approach here:
+# add parameters only once a live test run shows a concrete need for them (e.g.
+# a motor-thrust mapping mismatch, an EKF/GPS glitch specific to the water
+# surface, a loop-rate issue) — not preemptively guessed.

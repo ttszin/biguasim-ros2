@@ -877,8 +877,12 @@ class MissionNode(Node):
                 return
 
         elif action_type in ('reposition', 'go_to_known_gps_waypoint'):
-            if os.getenv('DRONE_TYPE', '') != 'quad':
-                self.get_logger().warn("Reposition action is only supported for 'quad' drone type. Skip.")
+            # 'rover' (BlueBoat/Rover position-hold test): same GlobalPositionTarget/GUIDED
+            # mechanism ardupilot_interface.cpp already uses for 'quad' in this altitude
+            # range — the altitude field below is simply ignored by Rover firmware (no
+            # z-axis control loop), so no separate code path is needed on either side.
+            if os.getenv('DRONE_TYPE', '') not in ('quad', 'rover'):
+                self.get_logger().warn("Reposition action is only supported for 'quad'/'rover' drone type. Skip.")
                 self.mission_step += 1
                 return
             req = SetReposition.Request()

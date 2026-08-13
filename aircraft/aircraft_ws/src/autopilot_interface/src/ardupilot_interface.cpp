@@ -201,8 +201,14 @@ void ArdupilotInterface::ardupilot_interface_printout_callback()
 {
     std::shared_lock<std::shared_mutex> lock(node_data_mutex_); // Use shared_lock for data reads
 
-    // Once the vehicle is in standby, retrieve for SYSID_THISMAV and MAV_TYPE if they are not already set
-    if ((mav_state_ == 3) && ((target_system_id_ == -1) || (mav_type_ == -1))) {
+    // Once the vehicle is in standby (Multicopter/VTOL) or active (Rover — see
+    // takeoff_handle_goal's comment on why Rover never reports STANDBY),
+    // retrieve SYSID_THISMAV and MAV_TYPE if they are not already set. Without
+    // this widening, mav_type_ would stay at its initial -1 forever for any
+    // vehicle that never reports mav_state_==3, and every mav_type_-gated
+    // branch in this file (including the new mav_type_==10 Rover path) would
+    // never execute.
+    if ((mav_state_ == 3 || mav_state_ == 4) && ((target_system_id_ == -1) || (mav_type_ == -1))) {
         auto request = std::make_shared<VehicleInfoGet::Request>();
         vehicle_info_client_->async_send_request(request,
             [this](rclcpp::Client<VehicleInfoGet>::SharedFuture future) {
@@ -323,8 +329,17 @@ void ArdupilotInterface::set_reposition_callback(const std::shared_ptr<autopilot
 {
     {
         std::shared_lock<std::shared_mutex> lock(node_data_mutex_); // Use shared_lock for data reads
-        if ((mav_type_ == 1) || ((mav_type_ == 2) && !(aircraft_fsm_state_ == ArdupilotInterfaceState::MC_HOVER || aircraft_fsm_state_ == ArdupilotInterfaceState::MC_ORBIT))) {
-            response->message = "Set reposition rejected, ArdupilotInterface is not in a quad hover/orbit state (for VTOLs, use /orbit_action)";
+        // mav_type_==10: Ground Rover (BlueBoat position-hold test). Reuses ARMED as
+        // its "ready to reposition" state — Rover's takeoff_handle_accepted path
+        // (see mav_type_==10 branch there) goes STARTED -> GUIDED_PRETAKEOFF -> ARMED
+        // and stops there (no MC_HOVER-equivalent state; Rover has no altitude axis
+        // to climb through). Safe to reuse ARMED for this even though Multicopter
+        // also passes through it — mav_type_ is fixed for the life of this node
+        // (one vehicle per SITL session), so the two code paths never interleave.
+        if ((mav_type_ == 1)
+            || ((mav_type_ == 2) && !(aircraft_fsm_state_ == ArdupilotInterfaceState::MC_HOVER || aircraft_fsm_state_ == ArdupilotInterfaceState::MC_ORBIT))
+            || ((mav_type_ == 10) && (aircraft_fsm_state_ != ArdupilotInterfaceState::ARMED))) {
+            response->message = "Set reposition rejected, ArdupilotInterface is not in a quad hover/orbit state or armed rover state (for VTOLs, use /orbit_action)";
             RCLCPP_ERROR(this->get_logger(), "%s", response->message.c_str());
             response->success = false;
             return;
@@ -977,8 +992,13 @@ rclcpp_action::GoalResponse ArdupilotInterface::takeoff_handle_goal(const rclcpp
         RCLCPP_ERROR(this->get_logger(), "Takeoff rejected, ArdupilotInterface is not in STARTED state");
         return rclcpp_action::GoalResponse::REJECT;
     }
-    if (mav_state_ != 3) {
-        RCLCPP_ERROR(this->get_logger(), "Takeoff rejected, mav_state_ is not standby");
+    // mav_state 3 = MAV_STATE_STANDBY (Multicopter/VTOL before arming). Rover
+    // firmware doesn't report STANDBY the same way — confirmed live it reports
+    // 4 = MAV_STATE_ACTIVE from startup, disarmed, in MANUAL mode (no separate
+    // "standby until armed" state like Copter). Same relaxation applied to
+    // t2_aircraft.yml.erb's mission-start gate, which hit the identical issue.
+    if (mav_state_ != 3 && !(mav_type_ == 10 && mav_state_ == 4)) {
+        RCLCPP_ERROR(this->get_logger(), "Takeoff rejected, mav_state_ is not standby/active-rover (%d)", mav_state_);
         return rclcpp_action::GoalResponse::REJECT;
     }
     if (active_srv_or_act_flag_.exchange(true)) {
@@ -1201,6 +1221,71 @@ void ArdupilotInterface::takeoff_handle_accepted(const std::shared_ptr<rclcpp_ac
                 goal_handle->publish_feedback(feedback);
                 taking_off = false;
             }
+        } else if (mav_type_ == 10) { // Ground Rover (e.g. BlueBoat): no altitude axis, no real
+                                       // "takeoff" — arms and enters GUIDED, then declares this
+                                       // Takeoff action complete. Reused (not a new action type)
+                                       // to avoid adding a new .action message just for this.
+            if ((current_fsm_state == ArdupilotInterfaceState::STARTED) && (current_time_us > (time_of_last_srv_req_us_ + ACTION_REQ_DELAY_SEC * 1000000))) {
+                // Same home-position re-validation as the Multicopter branch above — the
+                // MAVROS zero-placeholder-before-first-fix bug isn't Multicopter-specific.
+                bool home_valid = !(std::isnan(home_alt_) ||
+                    (std::abs(home_lat_) < 1e-6 && std::abs(home_lon_) < 1e-6));
+                if (!home_valid) {
+                    time_of_last_srv_req_us_ = current_time_us;
+                    bool position_valid = !(std::isnan(lat_) || std::isnan(lon_) || std::isnan(alt_) ||
+                        (std::abs(lat_) < 1e-6 && std::abs(lon_) < 1e-6));
+                    if (position_valid) {
+                        std::unique_lock<std::shared_mutex> lock(node_data_mutex_);
+                        home_lat_ = lat_;
+                        home_lon_ = lon_;
+                        home_alt_ = alt_;
+                        RCLCPP_WARN(this->get_logger(), "Home position re-validated: lat_ %.5f lon_ %.5f alt_ %.2f",
+                            home_lat_, home_lon_, home_alt_);
+                    } else {
+                        RCLCPP_WARN(this->get_logger(), "Waiting for a valid global position before arming rover...");
+                    }
+                } else {
+                    auto set_mode_request = std::make_shared<SetMode::Request>();
+                    set_mode_request->custom_mode = "GUIDED";
+                    time_of_last_srv_req_us_ = current_time_us;
+                    call_service_and_update_fsm<SetMode, autopilot_interface_msgs::action::Takeoff>(
+                        set_mode_client_, set_mode_request, goal_handle,
+                        "Request mode", ArdupilotInterfaceState::GUIDED_PRETAKEOFF);
+                }
+            } else if (current_fsm_state == ArdupilotInterfaceState::GUIDED_PRETAKEOFF) {
+                if (armed_flag_) {
+                    std::unique_lock<std::shared_mutex> lock(node_data_mutex_);
+                    aircraft_fsm_state_ = ArdupilotInterfaceState::ARMED;
+                } else if (current_time_us > (time_of_last_srv_req_us_ + ACTION_REQ_DELAY_SEC * 1000000)) {
+                    time_of_last_srv_req_us_ = current_time_us;
+                    auto arm_request = std::make_shared<CommandLong::Request>();
+                    arm_request->command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
+                    arm_request->param1 = 1.0f;
+                    arm_request->param2 = 2989.0f; // force arm magic number (same as MAVProxy)
+                    command_long_client_->async_send_request(arm_request,
+                        [this](rclcpp::Client<CommandLong>::SharedFuture future) {
+                            RCLCPP_INFO(this->get_logger(), "Force arm (rover): %s",
+                                future.get()->success ? "accepted" : "rejected, retrying");
+                        });
+                }
+            } else if (current_fsm_state == ArdupilotInterfaceState::ARMED) {
+                // No climb to wait for — armed + GUIDED is the whole "takeoff" for a Rover.
+                feedback->message = "Rover armed and in GUIDED (no takeoff needed)";
+                goal_handle->publish_feedback(feedback);
+                taking_off = false;
+            }
+        } else {
+            // Unsupported mav_type reaching this loop: fail closed instead of hanging forever.
+            // Confirmed by direct code analysis: before this branch existed, any mav_type other
+            // than 1/2 fell through this whole if/else chain doing nothing every iteration,
+            // and `taking_off` never became false — a silent, permanent hang.
+            RCLCPP_ERROR(this->get_logger(), "Takeoff aborted: unsupported mav_type_ %d", mav_type_);
+            feedback->message = "Unsupported vehicle type";
+            goal_handle->publish_feedback(feedback);
+            result->success = false;
+            goal_handle->abort(result);
+            active_srv_or_act_flag_.store(false);
+            return;
         }
     }
     result->success = true;
