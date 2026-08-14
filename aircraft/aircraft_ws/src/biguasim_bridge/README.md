@@ -704,20 +704,21 @@ validated, since BlueROVHeavy shares ArduSub with it and TorpedoAUV uses a
 different `control_abstraction` (`cmd_rudders_sterns_motor_speed`) needing
 its own investigation.
 
-## Position-hold for BlueROV2 (ArduSub) — code done, SITL live validation NOT achieved
+## Position-hold for BlueROV2 (ArduSub) — real crash bug found and fixed; a second, separate hang remains
 
 **Status: `ardupilot_interface.cpp`/`mission_node.py`/scripts all implemented
-and code-reviewed correct. Live GUIDED-mode position-hold over a real
-ArduPilot SITL bridge was never confirmed — every attempt (12+ across two
-sessions, including two different `control_abstraction` workarounds) hit
-BiguaSim/Unreal Engine hanging or crashing during agent spawn, before or
-shortly after MAVROS could exercise GUIDED. This is a BiguaSim engine bug,
-not something in this repo. The one thing confirmed live and stable is
-BiguaSim's own non-SITL, teleport-driven `bluerov0` prop (`cmd_pos_yaw`,
-`biguasim_sim_runner.py`, the same agent already used in earlier T2 work)
-holding a fixed position — see "What was actually confirmed" below for
-exactly what that does and doesn't prove. See below for the full
-investigation, what was ruled out, and what's still needed.**
+and code-reviewed correct. The deterministic SIGSEGV that blocked every
+`cmd_motor_speeds` spawn attempt (12+ across two sessions) was root-caused
+to a real bug in BiguaSim's own Python package — a shared-memory command
+buffer allocated with the wrong size — and fixed, confirmed live (2000
+ticks, zero crashes, using the unmodified real bridge code, no workaround).
+That fix lives in `~/biguasim` (a separate repo from this one) and needs to
+be preserved there independently. Live GUIDED-mode position-hold over a
+real ArduPilot SITL bridge is still not confirmed end-to-end: retrying the
+full pipeline after the fix hit a second, different, still-unexplained
+Unreal Engine hang (no crash signature, just stalls) — see "The real fix"
+below for the full root-cause story, and "The Unreal Engine hang" further
+below for what's already been ruled out for this second issue.**
 
 Investigated first (two Explore-agent passes, file:line-grounded) whether
 ArduSub needs a structurally different mechanism than Rover did. Findings,
@@ -1025,29 +1026,93 @@ with the same class of bug as `SpawnAgentCommand.cpp`'s assertion, just
 triggered less deterministically for this abstraction. Retry a few times if
 using this workaround; it is not guaranteed to spawn on the first attempt.
 
+### The real fix: a confirmed buffer-size bug in BiguaSim's own Python package
+
+Local access to HoloOcean's engine source (`~/holoocean`, the open-source
+project BiguaSim is built on — `byu-holoocean/HoloOcean` upstream) made it
+possible to actually read `SpawnAgentCommand.cpp:32`'s own comment: `SpawnAgent`
+is a `UFUNCTION(BlueprintImplementableEvent)` with zero C++ body — the real
+spawn logic lives in a Blueprint graph (`HolodeckGameModeBP.uasset`), not
+editable or debuggable without the Unreal Editor GUI (confirmed not
+practically available in this environment — no built `UnrealEditor` binary,
+no full engine association). That closed off a direct Blueprint fix, but
+led to a more useful discovery: HoloOcean's native `UBlueROV2ControlThrusters`
+and `UBlueROV2ControlPD` C++ classes (`Source/Holodeck/Agents/Public/BlueROV2Control*.h`)
+both declare `GetControlSchemeSizeInBytes() -> 8 * sizeof(float)` — the
+engine's own "BlueROV2" control scheme unconditionally expects an **8-float**
+shared-memory command buffer. BiguaSim's own Python side
+(`biguasim/agents.py`, `BiguaSimAgent.__init__`) allocates that buffer with
+a **hardcoded size of 6** for every agent, regardless of vehicle type —
+confirmed by reading the commented-out code right above it, which
+originally intended to size the buffer dynamically per-agent but was never
+finished. Every `cmd_motor_speeds` tick for BlueROV2, the C++ side reads 8
+floats from a region only allocated for 6 — an out-of-bounds read of live
+shared memory, fully consistent with the SIGSEGV/near-null-pointer crash
+signature observed throughout this investigation.
+
+**Fix applied and confirmed live**: changed `_max_control_abstraction_length`
+from `6` to `8` in `agents.py` (safe for every other vehicle too —
+`__act__` already zero-pads shorter action arrays, so nothing regresses for
+agents that only ever send 6 or fewer values). Re-ran the *unmodified* real
+bridge path (`biguasim_sim_runner_bluerov2.py`, genuine `cmd_motor_speeds`,
+no workaround) in isolation: a full 2000-tick / 10s loop completed cleanly,
+zero crashes — the exact test that failed 100% of the time before this fix.
+**This file lives in the separate `biguasim` Python package
+(`~/biguasim` on this machine, its own git repo, not part of
+`aerial-autonomy-stack`) — the fix needs to be committed/preserved there
+independently, and reapplied on any other machine/install running this
+stack.**
+
+**Not yet a full resolution — a second, separate, still-unexplained hang
+persists.** Retrying the full SITL-bridged flow (SITL + the GPS_INPUT
+bridge + BiguaSim) with the fix applied hung twice more, at the exact same
+spawn point as before (right after sensor setup, first graphics PSO
+compile, GPU utilization dropping to and staying at 0%) — genuinely
+different from the SIGSEGV signature (no crash text, no `SpawnedAgent`
+assertion, just silence). Ruled out resource contention as the cause: even
+running `biguasim_sim_runner_bluerov2.py` **completely alone**, with no
+SITL or GPS bridge process competing for CPU/GPU, hit the identical hang.
+This looks like the same class of intermittent Unreal Engine/GPU-driver
+instability investigated exhaustively earlier in this session (shader
+cache clearing, headless mode, spawn depth, a full reboot — none of which
+fixed it then either) — quite possibly aggravated by this being roughly
+the 20th+ consecutive Unreal Engine launch across one very long session.
+**Best next step for whoever picks this up: retry after a real break or a
+fresh reboot, now that the underlying memory-safety bug is fixed** — every
+earlier hang could have been either bug; from here on, a hang is
+unambiguously the second, still-unexplained one, and a clean run
+plausibly validates the whole pipeline end to end.
+
 ### Next steps for whoever picks this back up
 
-1. **Report this to whoever maintains the BiguaSim build** (or get access
-   to its editor/source project) — `SpawnAgentCommand.cpp:33`'s
-   `SpawnedAgent` assertion failing specifically when spawning BlueROV2 with
-   `control_abstraction: "cmd_motor_speeds"` (not the blueprint/mesh, not
-   any sensor — `cmd_pos_yaw` with the identical blueprint and sensor set
-   works fine), and BlueROVHeavy failing this same assertion with *every*
-   `control_abstraction` tried, including `cmd_pos_yaw`. SIGSEGV at address
-   `0x3` right after the assertion. This blocks fully reliable live testing
-   and isn't fixable from this repo without engine source access.
-2. **In the meantime, `t2_bluerov2_velbridge_runner.py`'s `cmd_vel_yaw`
-   workaround is the best available path for BlueROV2** — real thrust
-   dynamics, just not 100% reliable at spawn (retry on hang/crash; see the
-   finding above). Don't bother with BlueROVHeavy until finding #1 above is
-   understood — no `control_abstraction` has gotten it running so far.
-3. Once BiguaSim/Unreal actually gets one of these vehicles running, the
+1. **First, just retry.** The confirmed memory-safety bug (buffer size 6
+   vs the engine's required 8) is fixed in `~/biguasim`'s `agents.py` —
+   commit that fix in the `biguasim` repo if it isn't already. The
+   remaining hang looks environmental/GPU-driver-related rather than a
+   deterministic code bug; a fresh session (reboot, or at least not the
+   20th+ launch in a row) has a real chance of getting a clean run all the
+   way through, given the original crash-causing bug is now gone.
+2. **`t2_bluerov2_velbridge_runner.py`'s `cmd_vel_yaw` workaround is no
+   longer necessary** for BlueROV2 now that the real `cmd_motor_speeds`
+   path is fixed — prefer the unmodified `biguasim_sim_runner_bluerov2.py`.
+   The workaround script is kept for reference/comparison, not as the
+   recommended path anymore.
+3. **BlueROVHeavy is still unresolved** — it segfaults with *every*
+   `control_abstraction` tried, including `cmd_pos_yaw`, unlike BlueROV2.
+   Not yet checked whether it hits the same buffer-size class of bug (its
+   own `agent_type` string may not even resolve to a real Blueprint/class
+   in the engine at all — not confirmed either way). Worth checking whether
+   `agents.py`'s `BlueROVHeavy` class's own action-space definition (`[8]`
+   for thrusters, matching what BlueROV2's *engine* class actually is) already
+   lines up correctly, or whether there's a different, still-unfound
+   mismatch specific to it.
+4. Once BiguaSim/Unreal actually gets one of these vehicles running, the
    GPS/GUIDED fix documented above (`GPS_TYPE=14` +
    `t2_gps_input_bridge_bluerov2.py`) is believed correct and ready to
    validate — it was reasoned through carefully via the dataflash log and
    ArduPilot's own source, but has never actually gotten to run against a
    live vehicle yet.
-4. If `GPS_TYPE=14` + the bridge script somehow doesn't clear
+5. If `GPS_TYPE=14` + the bridge script somehow doesn't clear
    `Sub::position_ok()` either, dig into *why* `GPS_TYPE=1`/`100`'s
    serial-probe detection loop never completes for ArduSub specifically.
    `AP_GPS.cpp`'s `_detect_instance()` (around the baud-cycling logic, just
@@ -1057,7 +1122,7 @@ using this workaround; it is not guaranteed to spawn on the first attempt.
    (`libraries/SITL/SIM_GPS.cpp`) are the places to check — compare against
    a working Copter SITL session's `_port[instance]`/UART wiring to see
    what's actually different for the `ardusub` binary.
-5. Once both are confirmed working, the rest of the pipeline (the
+6. Once both are confirmed working, the rest of the pipeline (the
    `mav_type_==12` reposition dispatch, the mission YAML, the logger's
    `global_position/local` fallback) is already implemented and should just
    work — these are believed to be the only two remaining blockers, not one
