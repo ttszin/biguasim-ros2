@@ -704,16 +704,20 @@ validated, since BlueROVHeavy shares ArduSub with it and TorpedoAUV uses a
 different `control_abstraction` (`cmd_rudders_sterns_motor_speed`) needing
 its own investigation.
 
-## Position-hold for BlueROV2 (ArduSub) — code + workaround done, live validation paused
+## Position-hold for BlueROV2 (ArduSub) — code done, SITL live validation NOT achieved
 
 **Status: `ardupilot_interface.cpp`/`mission_node.py`/scripts all implemented
-and code-reviewed correct. The GUIDED-mode blocker (vehicle arms but never
-leaves MANUAL) was root-caused to a real ArduSub GPS backend-detection bug
-in this SITL+BiguaSim environment (not EKF tuning) and worked around via a
-`GPS_TYPE=14` + MAVLink `GPS_INPUT` relay script. Live confirmation is still
-outstanding — paused after two unrelated Unreal Engine crashes, likely from
-resource pressure after many consecutive launches in one long session, not
-from the fix itself.**
+and code-reviewed correct. Live GUIDED-mode position-hold over a real
+ArduPilot SITL bridge was never confirmed — every attempt (12+ across two
+sessions, including two different `control_abstraction` workarounds) hit
+BiguaSim/Unreal Engine hanging or crashing during agent spawn, before or
+shortly after MAVROS could exercise GUIDED. This is a BiguaSim engine bug,
+not something in this repo. The one thing confirmed live and stable is
+BiguaSim's own non-SITL, teleport-driven `bluerov0` prop (`cmd_pos_yaw`,
+`biguasim_sim_runner.py`, the same agent already used in earlier T2 work)
+holding a fixed position — see "What was actually confirmed" below for
+exactly what that does and doesn't prove. See below for the full
+investigation, what was ruled out, and what's still needed.**
 
 Investigated first (two Explore-agent passes, file:line-grounded) whether
 ArduSub needs a structurally different mechanism than Rover did. Findings,
@@ -837,48 +841,252 @@ now sets `GPS1_TYPE`/`GPS_TYPE` to `14`. Must run this script alongside the
 SITL/BiguaSim processes (see its own docstring) — it isn't started
 automatically by anything yet.
 
-**Not yet validated live.** Two consecutive attempts to test this workaround
-both ended in a genuine Unreal Engine (Holodeck) crash during shader/PSO
-compilation, at the same point (right after spawning the BlueROV2 agent and
-its 5 sensors), before the vehicle ever got far enough to arm. Neither crash
-correlates with anything in the GPS fix itself — both happened before MAVROS
-even had a chance to try `SET_MODE GUIDED`. Most likely cause: this was
-roughly the 10th consecutive Unreal Engine cold-launch in one very long
-session (host swap usage was at 2.9 GiB when the second crash was
-diagnosed, consistent with accumulated memory pressure across many
-launch/kill cycles rather than anything specific to this vehicle or fix).
-**Paused here at the user's call** rather than continuing to retry into the
-same resource pressure — the `GPS_TYPE=14` + `t2_gps_input_bridge_bluerov2.py`
-workaround is implemented and reasoned through carefully, but still needs a
-live end-to-end run (ideally after a clean restart of the BiguaSim/GPU
-stack, not mid-session) to actually confirm it clears the GUIDED block and
-let the rest of the already-implemented pipeline run.
+**Not yet validated live — blocked by a second, separate, unresolved problem:
+BiguaSim/Unreal Engine hangs deterministically every time it tries to spawn
+the BlueROV2 agent, before ArduPilot/MAVROS ever get a chance to exercise
+the GPS fix above.** This is a different bug from the GUIDED-mode one — it
+happens earlier in the pipeline, entirely on the BiguaSim/rendering side,
+and blocks live confirmation of the (already correctly root-caused and
+implemented) GPS workaround.
+
+### The Unreal Engine hang: what was ruled out, methodically
+
+Confirmed reproducible across **nine separate attempts**, spanning two
+different sessions (one machine reboot in between): `HolodeckLog.txt`
+always stops advancing at the exact same point — right after the agent's
+last sensor is added and the *first* shader/graphics PSO for its visual
+mesh begins compiling (`LogRHI: Display: Encountered a new graphics PSO:
+908536767` is consistently the last or near-last line, byte-for-byte
+identical across unrelated sessions). GPU utilization drops to 0% and stays
+there; the process either exits (`<defunct>`) or just sits alive holding
+GPU memory with zero compute activity, indefinitely. DjiMatrice and
+BlueBoat have never hit this in the same environment — the underlying
+mechanism they both share (`ArduBiguaSimRunner.build_scenario()` +
+`run()`) needed **no code changes at all** to build a scenario for
+BlueROV2, so it is very unlikely to be a bug in that shared code path.
+
+Each of the following was tested as a hypothesis and disproved:
+
+1. **The `GPS_TYPE=14` param or `t2_gps_input_bridge_bluerov2.py` itself** —
+   disproved by running BiguaSim completely alone, with no bridge script and
+   no second MAVLink connection at all. Hung identically. (These two
+   processes don't share a port or any IPC with BiguaSim/Unreal anyway —
+   this was more a sanity check than a real suspect, but the timing
+   correlation with when the hangs started made it worth ruling out
+   explicitly.)
+2. **The on-screen viewport / rendering window** — disproved by running
+   headless (`biguasim_sim_runner_bluerov2.py` without `--viewport`, which
+   passes SITL's `-RenderOffScreen` flag). Hung at the identical point, 0%
+   GPU utilization sustained for 165s straight before being declared stalled.
+3. **Spawn depth / submersion** — disproved across three different values:
+   submerged at spawn (z=-1.0), at the surface (z=0.2), and deeper (z=-3.0).
+   All three hang identically.
+4. **Host memory/resource pressure from many consecutive Unreal launches in
+   one long session** — disproved by a full machine reboot (swap dropped
+   from 2.9 GiB to 0, GPU memory to 20 MiB) followed by immediately retrying:
+   hung on the very first attempt post-reboot, and every attempt after.
+5. **A corrupted on-disk shader cache from an earlier `kill -9` interrupting
+   a compile mid-write** — the most promising lead, since NVIDIA's driver
+   caches compiled shaders (used by both OpenGL and Vulkan, despite the
+   name) at `~/.cache/nvidia/GLCache`, and one of its files had a modify
+   timestamp matching a crash almost to the second. Disproved by deleting
+   that cache entirely and retrying: the driver visibly rebuilt it from
+   scratch (grew back to 5.7 MB during the run) and still hung at the exact
+   same point.
+6. **The `DepthSensor` specifically** — the strongest lead, since it's the
+   one sensor BlueROV2 has that BlueBoat/DjiMatrice don't
+   (`include_depth_sensor=True` only for BlueROV2/BlueROVHeavy in
+   `vehicle.py`'s `VEHICLE_REGISTRY`), and it was always the last sensor
+   logged immediately before every hang. Disproved directly: rebuilt the
+   scenario with `dataclasses.replace(profile, include_depth_sensor=False)`
+   (BiguaSim's own `VehicleProfile` is a plain dataclass, so this doesn't
+   touch the shared registry) and reran. `DepthSensor` was confirmed absent
+   from the log this time — and it hung anyway, at the **same graphics PSO
+   ID** (`908536767`), now immediately after `IMUSensor` instead (the new
+   last sensor). This proves the hang isn't about any particular sensor at
+   all: it's tied to the first visual-mesh shader compile for this agent,
+   which happens right after sensor setup regardless of which sensor was
+   last.
+
+### Root-caused: a real segfault in BiguaSim's own `SpawnAgentCommand.cpp`
+
+Two more findings closed this out. First, a housekeeping discovery while
+setting up the differential test below: every prior kill of a hung/crashed
+BiguaSim session leaked its POSIX shared-memory segments and semaphores
+(`/dev/shm/HOLODECK_MEM<uuid>_*`, `/dev/shm/sem.HOLODECK_SEMAPHORE_*`) —
+`ArduBiguaSimRunner`'s context-manager cleanup never runs when a process is
+`kill -9`'d instead of exiting normally. Seven full sets had accumulated
+(harmless in terms of actual space — tmpfs showed 1% used despite `ls -la`
+reporting 1 GiB per `command_buffer` file, since they're sparse — but a real
+leak regardless, and worth clearing: `rm -f /dev/shm/HOLODECK_MEM*
+/dev/shm/sem.HOLODECK_SEMAPHORE_*` after killing any hung session).
+
+Second, and the actual answer: tried a **differential test with
+`BlueROVHeavy`** (new diagnostic-only `t2_sitl_run_bluerovheavy.sh` /
+`t2_biguasim_bluerovheavy.parm` / `biguasim_sim_runner_bluerovheavy.py`,
+same pattern as the BlueROV2 scripts — shares ArduSub and
+`include_depth_sensor=True`, differs only in motor count/mapping). It hit
+the identical failure. But this run, for the first time, produced a
+**real, complete crash log** instead of a silent hang (`HolodeckLog.txt`):
+
+```
+Assertion failed: SpawnedAgent [File:.../ClientCommands/Private/SpawnAgentCommand.cpp] [Line: 33]
+Signal 11 caught.
+Unhandled Exception: SIGSEGV: invalid attempt to write memory at address 0x0000000000000003
+```
+
+`SpawnAgentCommand.cpp:33` asserts that the just-spawned agent pointer is
+valid; here it isn't, and the code goes on to dereference it anyway,
+segfaulting at a near-null address. This is a **genuine bug in BiguaSim's
+own compiled engine code** — not a shader/asset issue, not a cache issue,
+not anything in this repo or launch parameters, and not specific to
+BlueROV2's own asset (BlueROVHeavy hits the exact same assertion). It
+explains every earlier observation at once: deterministic (same code path
+every time) and immune to every external variable tried (rendering,
+viewport, spawn depth, reboot, shader cache — none of them touch agent
+spawning logic). It also explains why most attempts looked like a silent
+*hang* rather than a crash: `HolodeckLog.txt` shows the engine's own crash
+handler trying and failing to launch `CrashReportClient` (`File does not
+exist` — that binary is simply missing from this packaged BiguaSim build),
+and depending on timing that failed launch attempt sometimes returns
+quickly (process exits, `<defunct>`) and sometimes appears to hang before
+finishing crash handling (process alive, 0% GPU utilization, holding GPU
+memory indefinitely) — two different-looking symptoms of the exact same
+underlying segfault.
+
+**Not fixable from this repo, but narrowed down to the actual trigger.**
+This is a bug in BiguaSim's shipped engine binary (`SpawnAgentCommand.cpp`,
+not part of this repo's source) — but which spawn-time condition trips it
+turned out to be findable without engine source access, by differential
+testing against `biguasim_sim_runner.py`'s own long-validated `bluerov0`
+agent (the decorative, non-SITL prop used in earlier T2 land-test work,
+`agent_type: "BlueROV2"`, `control_abstraction: "cmd_pos_yaw"`, driven by
+teleport commands, not ArduPilot). That agent spawns and runs fine —
+confirmed live, 4+ minutes of stable 47-84% GPU utilization — using the
+exact same underlying blueprint. Adding its sensors up one at a time onto
+that known-working config (`DynamicsSensor`+`LocationSensor` →
+`+VelocitySensor`) still worked fine every step, ruling out **every
+sensor**, including `DepthSensor`/`IMUSensor` which were the strongest
+suspects earlier. The one remaining difference between that always-working
+config and `ArduBiguaSimRunner.build_scenario()`'s always-crashing one is
+`control_abstraction`: `"cmd_pos_yaw"` (teleport-driven, works) vs
+`"cmd_motor_speeds"` (individual per-motor thrust control, crashes) — the
+value `VEHICLE_REGISTRY["BlueROV2"]`/`["BlueROVHeavy"]` both specify, and
+the only abstraction that actually lets ArduPilot's PWM output drive a real
+vehicle (BlueBoat also uses `cmd_motor_speeds` and works fine, so it's not
+that value in isolation either — likely something specific to how
+BlueROV2/BlueROVHeavy's particular motor *count/socket* configuration
+(6 or 8 individual thrusters) gets wired up during spawn, which
+`SpawnAgentCommand.cpp` chokes on for these two vehicles specifically).
+
+This means the underlying blueprint/mesh/sensors are all fine — the crash
+is isolated to agent-spawn-time motor-thruster setup for `cmd_motor_speeds`
+control specifically on these two vehicles, not anything broader.
+
+### `cmd_vel_yaw` workaround: implemented, reduces but does not eliminate the risk
+
+Tried building a real bridge around this: `t2_bluerovheavy_velbridge_runner.py`
+and `t2_bluerov2_velbridge_runner.py` (new) reimplement
+`ArduBiguaSimRunner.run()`'s loop, but translate ArduPilot's real PWM output
+into a `[vx, vy, vz, yaw_delta_deg]` `cmd_vel_yaw` command instead of sending
+it as `cmd_motor_speeds` directly — using each vehicle's own
+`motor_mapping`/`motor_signs`/`pwm_converters` (already in `vehicle.py`) to
+get individual per-motor thrust, then approximating heave from the vertical
+motors and surge from the horizontal ones (sway and yaw aren't
+reconstructed — see each script's docstring for the exact reasoning and
+known limitations). This is a real bridge, not a fake one:
+`cmd_vel_yaw`'s handler in BiguaSim's own `uuv.py` runs a genuine
+P-controller (velocity error → desired force → `TM_to_f` → thruster forces
+→ motor speeds), so real thrust/mass dynamics are still exercised, just
+through an extra control loop stacked on top of ArduSub's own.
+
+**First finding: `BlueROVHeavy` is broken regardless of `control_abstraction`.**
+Tested `cmd_pos_yaw` directly against it (the one value otherwise confirmed
+always-safe) — same `SpawnAgentCommand.cpp:33` assertion, same SIGSEGV. This
+is a different, apparently deeper problem than BlueROV2's (which only
+breaks with `cmd_motor_speeds`) — no combination tried gets `BlueROVHeavy`
+running. Not investigated further; treat it as blocked independent of
+everything above until proven otherwise.
+
+**Second finding: `BlueROV2` + `cmd_vel_yaw` is not reliably stable either.**
+An isolated spawn test (bypassing the SITL bridge entirely — just
+`ArduBiguaSimRunner` + direct `env.step()` calls) ran cleanly for a full
+2000-tick / 10s loop with sustained 67-84% GPU utilization, no crash. But
+the very next run, this time through the *real* bridge script
+(`t2_bluerov2_velbridge_runner.py`, identical scenario construction, only
+difference being `bridge.bind()` + waiting on real ArduPilot PWM instead of
+a hardcoded test command), hung at the exact same spawn point for 4+
+minutes with 0% GPU utilization and no crash signature — not a repeat of
+the `cmd_motor_speeds` failure (that failed on *every* one of 9+ attempts,
+100% reproducible), but not reliable either. **Conclusion: `cmd_vel_yaw`
+lowers the failure rate for BlueROV2 but does not eliminate whatever
+underlying spawn-time instability BiguaSim has** — this looks consistent
+with the same class of bug as `SpawnAgentCommand.cpp`'s assertion, just
+triggered less deterministically for this abstraction. Retry a few times if
+using this workaround; it is not guaranteed to spawn on the first attempt.
 
 ### Next steps for whoever picks this back up
 
-1. **First**, just retry `t2_gps_input_bridge_bluerov2.py` + the existing
-   pipeline after a clean environment (fresh reboot or at least a session
-   with no prior Unreal launches) — the GUIDED blocker itself was
-   root-caused and worked around; only the live confirmation run is
-   outstanding, and it was blocked by an unrelated crash, not a flaw in the
-   fix.
-2. If `GPS_TYPE=14` + the bridge script doesn't clear `Sub::position_ok()`
-   either, dig into *why* `GPS_TYPE=1`/`100`'s serial-probe detection loop
-   never completes for ArduSub specifically — that's the real, still-open
-   bug. `AP_GPS.cpp`'s `_detect_instance()` (around the baud-cycling logic,
-   just above the `GPS_TYPE_SITL` switch case) and whatever SITL-side code
-   is supposed to be feeding synthetic uBlox-protocol bytes onto the virtual
-   serial port `GPS_TYPE=1`/`AUTO` probes against (`libraries/SITL/SIM_GPS.cpp`)
-   are the places to check next — compare against a working Copter SITL
-   session's `_port[instance]`/UART wiring to see what's actually different
-   for the `ardusub` binary.
-3. Once GUIDED is confirmed working, the rest of the pipeline (the
+1. **Report this to whoever maintains the BiguaSim build** (or get access
+   to its editor/source project) — `SpawnAgentCommand.cpp:33`'s
+   `SpawnedAgent` assertion failing specifically when spawning BlueROV2 with
+   `control_abstraction: "cmd_motor_speeds"` (not the blueprint/mesh, not
+   any sensor — `cmd_pos_yaw` with the identical blueprint and sensor set
+   works fine), and BlueROVHeavy failing this same assertion with *every*
+   `control_abstraction` tried, including `cmd_pos_yaw`. SIGSEGV at address
+   `0x3` right after the assertion. This blocks fully reliable live testing
+   and isn't fixable from this repo without engine source access.
+2. **In the meantime, `t2_bluerov2_velbridge_runner.py`'s `cmd_vel_yaw`
+   workaround is the best available path for BlueROV2** — real thrust
+   dynamics, just not 100% reliable at spawn (retry on hang/crash; see the
+   finding above). Don't bother with BlueROVHeavy until finding #1 above is
+   understood — no `control_abstraction` has gotten it running so far.
+3. Once BiguaSim/Unreal actually gets one of these vehicles running, the
+   GPS/GUIDED fix documented above (`GPS_TYPE=14` +
+   `t2_gps_input_bridge_bluerov2.py`) is believed correct and ready to
+   validate — it was reasoned through carefully via the dataflash log and
+   ArduPilot's own source, but has never actually gotten to run against a
+   live vehicle yet.
+4. If `GPS_TYPE=14` + the bridge script somehow doesn't clear
+   `Sub::position_ok()` either, dig into *why* `GPS_TYPE=1`/`100`'s
+   serial-probe detection loop never completes for ArduSub specifically.
+   `AP_GPS.cpp`'s `_detect_instance()` (around the baud-cycling logic, just
+   above the `GPS_TYPE_SITL` switch case) and whatever SITL-side code is
+   supposed to be feeding synthetic uBlox-protocol bytes onto the virtual
+   serial port `GPS_TYPE=1`/`AUTO` probes against
+   (`libraries/SITL/SIM_GPS.cpp`) are the places to check — compare against
+   a working Copter SITL session's `_port[instance]`/UART wiring to see
+   what's actually different for the `ardusub` binary.
+5. Once both are confirmed working, the rest of the pipeline (the
    `mav_type_==12` reposition dispatch, the mission YAML, the logger's
    `global_position/local` fallback) is already implemented and should just
-   work — this is believed to be the only remaining blocker, not one of
-   several.
+   work — these are believed to be the only two remaining blockers, not one
+   of several.
 
-## Bugs found during end-to-end validation
+### What was actually confirmed, given SITL live validation wasn't reachable
+
+After 12+ attempts across two sessions (`cmd_motor_speeds`: 100% failure
+rate over 9+ tries; `cmd_vel_yaw`: succeeded once in isolation, then hung
+twice more through the real bridge) failed to get a stable enough BiguaSim
+session to exercise ArduSub GUIDED position-hold end to end, this was
+de-scoped: **BiguaSim's own non-SITL `bluerov0` prop** — the same
+decorative, teleport-held agent already used in earlier T2 land-test work
+(`biguasim_sim_runner.py`, `control_abstraction: "cmd_pos_yaw"`, held at a
+fixed `rov_hold` location every tick, no ArduPilot involved at all) — was
+run instead, purely to confirm the BlueROV2 blueprint itself still holds a
+commanded position reliably in this environment. Confirmed live and stable.
+
+**This does not validate what the task actually needs.** `cmd_pos_yaw` is
+driven directly by BiguaSim's own Python-side position controller, not by
+ArduPilot's EKF/GUIDED-mode controller — it proves the blueprint can be
+commanded to hold a position, not that ArduSub's own position-hold logic
+(the thing `mav_type_==12`/the GPS workaround/the whole rest of this
+section exists to test) produces a stabilizing response over a real PWM
+bridge. That specific validation — the actual goal of this section — was
+**not achieved** in this environment. Whoever picks this back up should
+treat BlueROV2/BlueROVHeavy live SITL position-hold as still fully open,
+blocked on the BiguaSim spawn-time bug documented above, not as "mostly
+done."
 
 None of these were introduced by the Humble port itself — they were latent
 issues in `ardupilot_interface.cpp`/`mission_node.py`/the container's MAVROS

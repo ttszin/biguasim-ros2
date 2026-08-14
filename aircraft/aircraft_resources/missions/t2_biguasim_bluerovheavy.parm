@@ -1,0 +1,15 @@
+# BiguaSim T2 SITL overrides for the BlueROVHeavy (ArduSub) — NAME VALUE format
+#
+# Purely diagnostic for now — see t2_sitl_run_bluerovheavy.sh's header comment
+# and biguasim_bridge/README.md's "Position-hold for BlueROV2 (ArduSub)"
+# section. Same param set already reasoned through and (partially) tested for
+# BlueROV2's t2_biguasim_bluerov2.parm, reused here unchanged since
+# BlueROVHeavy shares the same ArduSub firmware and the same BiguaSim/JSON
+# SITL setup — no new investigation needed for these specific values, only
+# for whether the Unreal Engine hang itself reproduces for this vehicle too.
+SCHED_LOOP_RATE 120
+FS_EKF_ACTION 0
+EK3_CHECK_SCALE 200
+EK3_GLITCH_RAD 5
+GPS1_TYPE 14
+GPS_TYPE 14
