@@ -1,0 +1,28 @@
+steps:
+  # "takeoff" here means arm + enter GUIDED — reused from the Multicopter/Rover
+  # action type (ardupilot_interface.cpp's mav_type_==12 branch treats it that
+  # way; no new action/message type needed). takeoff_altitude is ignored for
+  # Sub (GUIDED just holds wherever it currently is) — set to 0.0 for clarity,
+  # not because it does anything.
+  - action: takeoff
+    params:
+      takeoff_altitude: 0.0
+
+  # Real depth target: negative altitude is a genuine dive command for Sub
+  # (mav_type_==12 always uses the plain GlobalPositionTarget/GUIDED branch in
+  # set_reposition_callback, regardless of altitude sign — see that function's
+  # comments). This is what actually differentiates this test from the
+  # BlueBoat's 2D surface hold: it validates position hold while submerged.
+  - action: go_to_known_gps_waypoint
+    params:
+      north: 5.0
+      east: 0.0
+      altitude: -3.0
+
+  # Hold in place at depth — run log_hover_stability.py in a separate terminal
+  # during this window, same as t2_hover_test.yaml/t2_rover_hold_test.yaml.
+  # No explicit disarm/land step: this test only needs to measure position/
+  # depth-hold stability, same scope decision as the Rover test.
+  - action: wait
+    params:
+      duration: 180.0

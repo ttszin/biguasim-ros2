@@ -15,8 +15,10 @@
 
   drone_id = ENV.fetch('DRONE_ID', 0).to_i
   conops = ENV.fetch('T2_CONOPS', '/aas/aircraft_resources/missions/t2_land_test.yaml')
-  # 'quad' (default, DjiMatrice/ArduCopter) or 'rover' (BlueBoat/Rover position-hold
-  # test — see t2_rover_hold_test.yaml + ardupilot_interface.cpp's mav_type_==10 path).
+  # 'quad' (default, DjiMatrice/ArduCopter), 'rover' (BlueBoat/Rover position-hold
+  # test — see t2_rover_hold_test.yaml + ardupilot_interface.cpp's mav_type_==10 path),
+  # or 'sub' (BlueROV2/ArduSub position-hold test — see t2_bluerov2_hold_test.yaml +
+  # ardupilot_interface.cpp's mav_type_==12 path).
   drone_type = ENV.fetch('T2_DRONE_TYPE', 'quad')
 %>
 

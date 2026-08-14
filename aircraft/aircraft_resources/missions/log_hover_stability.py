@@ -6,6 +6,15 @@ apm_pluginlists.yaml denylist). Run alongside t2_hover_test.yaml (or any
 other mission) in its own terminal to capture and summarize how well the
 vehicle holds position/attitude.
 
+Also subscribes to /mavros/global_position/local (same nav_msgs/Odometry
+shape) as a fallback position source: confirmed live that ArduSub's MAVROS
+instance never publishes /mavros/local_position/odom at all (no error, just
+silence — IMU and every GPS-derived topic work fine), while
+/mavros/global_position/local (also EKF/GPS-derived, just republished by
+MAVROS's global_position plugin under a different topic) does. Copter/Rover
+are unaffected — they already publish local_position/odom, which is
+preferred whenever both are available.
+
 Usage:
     python3 log_hover_stability.py --duration 180 --settle 20 --out hover_baseline.csv
 """
@@ -57,11 +66,15 @@ class HoverStabilityLogger(Node):
         )
         # Same topics/QoS ardupilot_interface.cpp already subscribes to (see
         # its local_position_odom_callback) — reused here read-only, no
-        # interference with the existing node.
+        # interference with the existing node. global_position/local is a
+        # fallback for vehicles (confirmed: ArduSub) that never publish
+        # local_position/odom — see module docstring.
         self._odom_sub = self.create_subscription(Odometry, '/mavros/local_position/odom', self._on_odom, qos)
+        self._global_local_sub = self.create_subscription(Odometry, '/mavros/global_position/local', self._on_global_local, qos)
         self._imu_sub = self.create_subscription(Imu, '/mavros/imu/data', self._on_imu, qos)
 
         self._last_odom = None
+        self._last_global_local = None
         self._last_imu = None
 
         self._out_path = out_path
@@ -86,6 +99,9 @@ class HoverStabilityLogger(Node):
     def _on_odom(self, msg: Odometry) -> None:
         self._last_odom = msg
 
+    def _on_global_local(self, msg: Odometry) -> None:
+        self._last_global_local = msg
+
     def _on_imu(self, msg: Imu) -> None:
         self._last_imu = msg
 
@@ -93,10 +109,12 @@ class HoverStabilityLogger(Node):
         now = self.get_clock().now().nanoseconds / 1e9
         t = now - self._t0
 
-        if self._last_odom is None or self._last_imu is None:
+        odom = self._last_odom or self._last_global_local
+        if odom is None or self._last_imu is None:
             if t >= self._duration:
                 self.get_logger().error(
-                    f"No data received on /mavros/local_position/odom or /mavros/imu/data after "
+                    f"No data received on /mavros/local_position/odom, "
+                    f"/mavros/global_position/local, or /mavros/imu/data after "
                     f"{self._duration}s — check topic names/QoS or run this from inside the same "
                     f"ROS2 distro as mavros (cross-distro host<->container DDS discovery can "
                     f"report topics as visible without ever delivering messages)."
@@ -105,9 +123,9 @@ class HoverStabilityLogger(Node):
                 rclpy.try_shutdown()
             return
 
-        p = self._last_odom.pose.pose.position
-        v = self._last_odom.twist.twist.linear
-        q = self._last_odom.pose.pose.orientation
+        p = odom.pose.pose.position
+        v = odom.twist.twist.linear
+        q = odom.pose.pose.orientation
         roll, pitch, yaw = _quat_to_euler_deg(q.x, q.y, q.z, q.w)
         av = self._last_imu.angular_velocity
 

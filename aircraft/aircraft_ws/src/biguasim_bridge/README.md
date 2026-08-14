@@ -699,14 +699,184 @@ as the DjiMatrice flow.
 
 ### Out of scope for this round
 
-BlueROV2, BlueROVHeavy, TorpedoAUV (all ArduSub) — deliberately deferred:
-depth axis, no real GPS underwater, submersion semantics, and missing
-`.parm` files (`bluerov2.parm`/`bluerovheavy.parm`/`torpedo.parm` are
-referenced in BiguaSim's `vehicle.py` but don't exist anywhere in either
-repo) make this meaningfully harder than Rover. This Rover path — a new
-`mav_type_` branch added alongside the existing ones, `ARMED` reused as the
-"ready" state, `Takeoff` reused rather than inventing a new action — is
-intended as the template for that follow-up work.
+BlueROVHeavy, TorpedoAUV — deferred until BlueROV2 (below) is fully
+validated, since BlueROVHeavy shares ArduSub with it and TorpedoAUV uses a
+different `control_abstraction` (`cmd_rudders_sterns_motor_speed`) needing
+its own investigation.
+
+## Position-hold for BlueROV2 (ArduSub) — code + workaround done, live validation paused
+
+**Status: `ardupilot_interface.cpp`/`mission_node.py`/scripts all implemented
+and code-reviewed correct. The GUIDED-mode blocker (vehicle arms but never
+leaves MANUAL) was root-caused to a real ArduSub GPS backend-detection bug
+in this SITL+BiguaSim environment (not EKF tuning) and worked around via a
+`GPS_TYPE=14` + MAVLink `GPS_INPUT` relay script. Live confirmation is still
+outstanding — paused after two unrelated Unreal Engine crashes, likely from
+resource pressure after many consecutive launches in one long session, not
+from the fix itself.**
+
+Investigated first (two Explore-agent passes, file:line-grounded) whether
+ArduSub needs a structurally different mechanism than Rover did. Findings,
+all confirmed correct by the live testing below: BiguaSim's synthetic GPS
+works underwater unconditionally (`bridge.py`'s `build_json_state()` always
+includes `"position"`; `include_depth_sensor` only adds a `"pressure"` field
+alongside it, never replaces position); ArduSub's own `vehicle_system_status()`
+(`GCS_MAVLink_Sub.cpp:58-73`) reports STANDBY(3)→ACTIVE(4) like Copter, not
+Rover's always-ACTIVE surprise; `SET_POSITION_TARGET_GLOBAL_INT` in GUIDED
+treats `alt` as standard z_up (so a depth target is just a negative altitude,
+no sign inversion needed); `ModeGuided::init()` needs no dive sequencing;
+`SCHEDULER_DEFAULT_LOOP_RATE` (`AP_Scheduler.cpp:44-47`) is 400 for ArduSub,
+same as Copter (unlike Rover's 50).
+
+### What was built
+
+- `t2_sitl_run_bluerov2.sh` (new) — mirrors `t2_sitl_run.sh`'s Copter pattern
+  (`-A "--rate 120"`), not Rover's no-fix approach, per the loop-rate finding
+  above.
+- `t2_biguasim_bluerov2.parm` (new) — `SCHED_LOOP_RATE 120` set proactively
+  (not left for live discovery, unlike the Rover case, since the framework
+  code already confirmed the need). Also carries `FS_EKF_ACTION 0`/
+  `EK3_CHECK_SCALE 200`/`EK3_GLITCH_RAD 5`, the same EKF-health relaxation
+  `t2_biguasim.parm` uses for the DjiMatrice — added after finding the GUIDED
+  block below, on the reasonable hypothesis that it was the same class of
+  BiguaSim-synthetic-GPS-glitch issue. **Confirmed live this did NOT fix the
+  blocker** (see below) — kept in the file since it's still a reasonable
+  defensive relaxation, but it is not sufficient on its own.
+- `biguasim_sim_runner_bluerov2.py` (new) — same `ArduBiguaSimRunner`-direct
+  pattern as the BlueBoat runner, spawns at the same validated water-crossing
+  point (x=25).
+- `ardupilot_interface.cpp`: new `mav_type_ == 12` branch in
+  `takeoff_handle_accepted`, structurally identical to the Rover branch (arm
+  + GUIDED, no altitude-wait) — **confirmed live this part works**: `mav_type_`
+  correctly detected as 12, home-position revalidation runs, force-arm
+  succeeds, FSM reaches `ARMED`. Widened `set_reposition_callback`'s guard to
+  accept `mav_type_==12` reusing `ARMED`. Also gated the three DjiMatrice-
+  specific GPS-free altitude branches (`desired_alt < -1.0`/`< 0.0`/`> 10.0`)
+  to `mav_type_ == 2` explicitly — found by inspection, before ever running
+  live, that an ungated negative depth target for Sub would have collided
+  with the DjiMatrice-specific forced-descent branch instead of the intended
+  plain `GlobalPositionTarget`/GUIDED path. **Confirmed live via a direct
+  `/set_reposition` service call** (bypassing `mission_node.py`) that the
+  dispatch correctly reaches the intended branch with the right values.
+- `mission_node.py`: `DRONE_TYPE` gate widened to `('quad', 'rover', 'sub')`.
+- `t2_bluerov2_hold_test.yaml` (new) — `takeoff` (arm+GUIDED) →
+  `go_to_known_gps_waypoint` (north=5, altitude=-3.0 — a real dive target,
+  unlike Rover's ignored altitude field) → `wait` 180s.
+- `log_hover_stability.py` — one real change needed here, unlike the Rover
+  case: added a fallback subscription to `/mavros/global_position/local`
+  (same `nav_msgs/Odometry` shape), used whenever `/mavros/local_position/odom`
+  has no data. Found live: ArduSub's MAVROS instance never publishes
+  `local_position/odom` at all in this setup (no error, just silence — IMU
+  and every GPS-derived topic publish fine), while `global_position/local`
+  (also GPS/EKF-derived, republished by MAVROS's `global_position` plugin)
+  does. Copter/Rover are unaffected — they already publish `local_position/odom`,
+  still preferred whenever available.
+
+### The actual blocker: GUIDED mode is refused, "Guided requires position"
+
+Confirmed live, repeatedly, across two SITL sessions (vehicle submerged at
+spawn, and respawned at the surface — same result both times, ruling out
+depth/submersion as the variable): the vehicle arms successfully (FSM reaches
+`ARMED`, `armed: true` on `/mavros/state`), but every `SET_MODE GUIDED`
+request is rejected by the firmware with MAVLink statustext `'Mode change
+failed: Guided requires position'`. MAVROS's `SetMode` service still reports
+`mode_sent: true` in every case — **that field only confirms the command was
+transmitted, not that the firmware accepted it**, which is easy to
+misdiagnose (the C++ FSM's `call_service_and_update_fsm` trusts exactly this
+field, and reaching `ARMED` doesn't actually prove GUIDED ever really took).
+
+Traced the exact rejection to ArduPilot's own source: `Sub::position_ok()`
+(`ArduSub/system.cpp:189`) → `Sub::ekf_position_ok()` requires (once armed)
+`AP_AHRS::Status::HORIZ_POS_ABS` and not `CONST_POS_MODE`, both of which
+derive from `NavEKF3_core::updateFilterStatus()`
+(`AP_NavEKF3_Control.cpp:805`): `horiz_pos_abs = doingNormalGpsNav &&
+filterHealthy`, requiring `PV_AidingMode == AID_ABSOLUTE`, which
+`setAidingMode()` only sets once `readyToUseGPS()` (`AP_NavEKF3_Control.cpp:590`)
+returns true — itself requiring `validOrigin && tiltAlignComplete &&
+yawAlignComplete && (delAngBiasLearned || ...) && gpsGoodToAlign &&
+gpsDataToFuse`. Confirmed live that `validOrigin` (the "EKF3 IMU0/1 origin
+set" statustext) takes an unusually long time to fire for ArduSub — in one
+session, ~90s after arming, versus seconds for Copter/Rover — and GUIDED
+still failed for several more minutes after that, meaning `validOrigin`
+alone isn't the bottleneck; one or more of the other `readyToUseGPS()`
+conditions never clears.
+
+**Root-caused via the dataflash log** (`Tools/autotest/logs/*.BIN`,
+`mavlogdump.py --types MSG` — far more reliable than the live MAVLink channel
+for this investigation, which struggled with request/response traffic all
+session, including `/mavros/param/get` and even a direct second pymavlink
+connection to the SITL port): every ArduSub session — tried with default
+`GPS_TYPE`, then `GPS_TYPE=1` (AUTO), then `GPS_TYPE=100` (the `GPS_TYPE_SITL`
+enum value, `AP_GPS.h:114`) — logs `GPS 1: probing for u-blox` (or `SITL`)
+**exactly once** and never advances to `EKF3 IMUx is using GPS`, no matter
+how long it runs. The equivalent DjiMatrice/Copter session, identical
+`--model JSON` setup, logs the same `probing for u-blox` line and completes
+in ~75s. So this is a real ArduSub-specific GPS backend-detection bug in
+this SITL+BiguaSim environment, not an EKF-tuning problem — confirmed by
+elimination: `EK3_SRC1_POSXY` is already GPS (shared `AP_NavEKF_Source.cpp`
+framework default, no ArduSub override exists in `ArduSub/Parameters.cpp`),
+the EKF-health params above don't change the outcome, and neither does
+`GPS_TYPE` 1 vs 100. `AP_GPS.cpp:_detect_instance()`'s backend-selection
+switch shows *why* `GPS_TYPE_SITL` requires probing at all rather than
+resolving instantly: it isn't in the short list of types
+(`MAV`/`UAVCAN*`/`MSP`/`EXTERNAL_AHRS`/`GSOF`) that bypass the generic
+serial baud-cycling detection loop — it falls through to that loop just like
+`AUTO`, and that loop is what's stuck.
+
+**Workaround implemented** (not a real fix — the actual GPS backend-detection
+bug in this environment is still unexplained): `GPS_TYPE_MAV = 14` **is** in
+that bypass list — `_detect_instance()` returns an `AP_GPS_MAV` backend for
+it immediately, no probing, and that backend just waits for MAVLink
+`GPS_INPUT` (#232) messages instead of anything serial-based.
+`t2_gps_input_bridge_bluerov2.py` (new) closes the loop: connects directly
+to the SITL's MAVLink port, reads this same vehicle's own
+`GLOBAL_POSITION_INT` (already confirmed reliable throughout this
+investigation), and relays it straight back as a synthetic `GPS_INPUT` with
+a plausible fix (`fix_type=3`, 10 satellites, `hdop=1.0`). `t2_biguasim_bluerov2.parm`
+now sets `GPS1_TYPE`/`GPS_TYPE` to `14`. Must run this script alongside the
+SITL/BiguaSim processes (see its own docstring) — it isn't started
+automatically by anything yet.
+
+**Not yet validated live.** Two consecutive attempts to test this workaround
+both ended in a genuine Unreal Engine (Holodeck) crash during shader/PSO
+compilation, at the same point (right after spawning the BlueROV2 agent and
+its 5 sensors), before the vehicle ever got far enough to arm. Neither crash
+correlates with anything in the GPS fix itself — both happened before MAVROS
+even had a chance to try `SET_MODE GUIDED`. Most likely cause: this was
+roughly the 10th consecutive Unreal Engine cold-launch in one very long
+session (host swap usage was at 2.9 GiB when the second crash was
+diagnosed, consistent with accumulated memory pressure across many
+launch/kill cycles rather than anything specific to this vehicle or fix).
+**Paused here at the user's call** rather than continuing to retry into the
+same resource pressure — the `GPS_TYPE=14` + `t2_gps_input_bridge_bluerov2.py`
+workaround is implemented and reasoned through carefully, but still needs a
+live end-to-end run (ideally after a clean restart of the BiguaSim/GPU
+stack, not mid-session) to actually confirm it clears the GUIDED block and
+let the rest of the already-implemented pipeline run.
+
+### Next steps for whoever picks this back up
+
+1. **First**, just retry `t2_gps_input_bridge_bluerov2.py` + the existing
+   pipeline after a clean environment (fresh reboot or at least a session
+   with no prior Unreal launches) — the GUIDED blocker itself was
+   root-caused and worked around; only the live confirmation run is
+   outstanding, and it was blocked by an unrelated crash, not a flaw in the
+   fix.
+2. If `GPS_TYPE=14` + the bridge script doesn't clear `Sub::position_ok()`
+   either, dig into *why* `GPS_TYPE=1`/`100`'s serial-probe detection loop
+   never completes for ArduSub specifically — that's the real, still-open
+   bug. `AP_GPS.cpp`'s `_detect_instance()` (around the baud-cycling logic,
+   just above the `GPS_TYPE_SITL` switch case) and whatever SITL-side code
+   is supposed to be feeding synthetic uBlox-protocol bytes onto the virtual
+   serial port `GPS_TYPE=1`/`AUTO` probes against (`libraries/SITL/SIM_GPS.cpp`)
+   are the places to check next — compare against a working Copter SITL
+   session's `_port[instance]`/UART wiring to see what's actually different
+   for the `ardusub` binary.
+3. Once GUIDED is confirmed working, the rest of the pipeline (the
+   `mav_type_==12` reposition dispatch, the mission YAML, the logger's
+   `global_position/local` fallback) is already implemented and should just
+   work — this is believed to be the only remaining blocker, not one of
+   several.
 
 ## Bugs found during end-to-end validation
 

@@ -329,17 +329,18 @@ void ArdupilotInterface::set_reposition_callback(const std::shared_ptr<autopilot
 {
     {
         std::shared_lock<std::shared_mutex> lock(node_data_mutex_); // Use shared_lock for data reads
-        // mav_type_==10: Ground Rover (BlueBoat position-hold test). Reuses ARMED as
-        // its "ready to reposition" state — Rover's takeoff_handle_accepted path
-        // (see mav_type_==10 branch there) goes STARTED -> GUIDED_PRETAKEOFF -> ARMED
-        // and stops there (no MC_HOVER-equivalent state; Rover has no altitude axis
-        // to climb through). Safe to reuse ARMED for this even though Multicopter
-        // also passes through it — mav_type_ is fixed for the life of this node
-        // (one vehicle per SITL session), so the two code paths never interleave.
+        // mav_type_==10/12: Ground Rover / Sub (BlueBoat / BlueROV2 position-hold
+        // tests). Both reuse ARMED as their "ready to reposition" state — their
+        // takeoff_handle_accepted paths (see those branches there) go STARTED ->
+        // GUIDED_PRETAKEOFF -> ARMED and stop there (no MC_HOVER-equivalent state;
+        // neither has a climb phase to wait through). Safe to reuse ARMED for this
+        // even though Multicopter also passes through it — mav_type_ is fixed for
+        // the life of this node (one vehicle per SITL session), so the code paths
+        // never interleave.
         if ((mav_type_ == 1)
             || ((mav_type_ == 2) && !(aircraft_fsm_state_ == ArdupilotInterfaceState::MC_HOVER || aircraft_fsm_state_ == ArdupilotInterfaceState::MC_ORBIT))
-            || ((mav_type_ == 10) && (aircraft_fsm_state_ != ArdupilotInterfaceState::ARMED))) {
-            response->message = "Set reposition rejected, ArdupilotInterface is not in a quad hover/orbit state or armed rover state (for VTOLs, use /orbit_action)";
+            || (((mav_type_ == 10) || (mav_type_ == 12)) && (aircraft_fsm_state_ != ArdupilotInterfaceState::ARMED))) {
+            response->message = "Set reposition rejected, ArdupilotInterface is not in a quad hover/orbit state or armed rover/sub state (for VTOLs, use /orbit_action)";
             RCLCPP_ERROR(this->get_logger(), "%s", response->message.c_str());
             response->success = false;
             return;
@@ -375,7 +376,16 @@ void ArdupilotInterface::set_reposition_callback(const std::shared_ptr<autopilot
     double desired_alt = request->altitude;
     RCLCPP_INFO(this->get_logger(), "New requested reposition East-North %.2f %.2f Alt. %.2f", desired_east, desired_north, desired_alt);
     for (int i = 0; i < REPOSITION_PUB_RETRIES; ++i) {
-        if (desired_alt < -1.0) {
+        // The three altitude-threshold branches below (<-1.0, <0.0, >10.0) encode
+        // DjiMatrice-specific GPS-free maneuvers (water-crossing descent, float-at-
+        // surface, vision-guided variable velocity) and are only meaningful for
+        // mav_type_==2. Gated explicitly on mav_type_==2 so a genuinely negative
+        // depth target for mav_type_==12 (Sub) doesn't get misrouted into e.g. the
+        // fixed -2 m/s forced-descent branch below — it needs the plain
+        // GlobalPositionTarget/GUIDED branch instead (confirmed ArduSub's GUIDED
+        // treats altitude as standard z_up, i.e. depth is just a negative altitude,
+        // no special handling needed on the ArduPilot side).
+        if ((mav_type_ == 2) && (desired_alt < -1.0)) {
             // Velocity-only descent: GPS-independent to avoid horizontal drift from BiguaSim
             // EKF GPS glitch that fires when crossing the water surface.
             // MAVROS ENU→NED: velocity.z = -2.0 (ENU down) → NED vel.z = +2.0 m/s (descend).
@@ -395,7 +405,7 @@ void ArdupilotInterface::set_reposition_callback(const std::shared_ptr<autopilot
             msg.velocity.y = 0.0f;  // ENU north = 0 → NED north = 0
             msg.velocity.z = -2.0f; // ENU down  (negative = downward) → NED vel.z = +2 m/s
             setpoint_raw_local_pub_->publish(msg);
-        } else if (desired_alt < 0.0) {
+        } else if ((mav_type_ == 2) && (desired_alt < 0.0)) {
             // Float at surface: vel.z = 0 tells ArduPilot to zero out vertical velocity.
             // The DjiMatrice hull has no Archimedes force in BiguaSim — it stabilizes near
             // the surface because SkyDive/Bridge's fluid collision stops it from sinking
@@ -418,7 +428,7 @@ void ArdupilotInterface::set_reposition_callback(const std::shared_ptr<autopilot
             msg.velocity.y = 0.0f;
             msg.velocity.z = 0.0f;
             setpoint_raw_local_pub_->publish(msg);
-        } else if (desired_alt > 10.0) {
+        } else if ((mav_type_ == 2) && (desired_alt > 10.0)) {
             // GPS-free velocity mode: north/east/up velocities, no position loop.
             // north/east inputs are reused as horizontal velocity (m/s); positive north = north.
             // vertical_velocity is ENU up (m/s), caller-provided (MAVROS converts ENU->NED
@@ -442,7 +452,11 @@ void ArdupilotInterface::set_reposition_callback(const std::shared_ptr<autopilot
             msg.velocity.z = static_cast<float>(request->vertical_velocity); // ENU up (m/s), caller-provided
             setpoint_raw_local_pub_->publish(msg);
         } else {
-            // Normal aerial navigation (0 ≤ alt ≤ 10 m): GPS global setpoint.
+            // Normal navigation via GlobalPositionTarget/GUIDED: Multicopter altitudes
+            // in [0, 10] m, Rover (mav_type_==10, altitude ignored by firmware), and
+            // Sub (mav_type_==12, altitude is a real depth target — negative values
+            // land here unconditionally now that the three branches above are gated
+            // to mav_type_==2 only).
             auto [des_lat, des_lon] = lat_lon_from_cartesian(home_lat_, home_lon_, desired_east, desired_north);
             auto msg = mavros_msgs::msg::GlobalPositionTarget();
             msg.header.stamp = this->get_clock()->now();
@@ -1271,6 +1285,70 @@ void ArdupilotInterface::takeoff_handle_accepted(const std::shared_ptr<rclcpp_ac
             } else if (current_fsm_state == ArdupilotInterfaceState::ARMED) {
                 // No climb to wait for — armed + GUIDED is the whole "takeoff" for a Rover.
                 feedback->message = "Rover armed and in GUIDED (no takeoff needed)";
+                goal_handle->publish_feedback(feedback);
+                taking_off = false;
+            }
+        } else if (mav_type_ == 12) { // Sub (e.g. BlueROV2): same "no real takeoff" shape as
+                                       // Rover above — arms and enters GUIDED, then declares
+                                       // this Takeoff action complete. GUIDED starts holding
+                                       // wherever the vehicle currently is (confirmed no dive
+                                       // sequencing needed, ArduSub's ModeGuided::init() just
+                                       // holds current position/depth) — a real depth target is
+                                       // sent separately afterwards via set_reposition_callback.
+                                       // Unlike Rover, no mav_state_==3 relaxation is needed
+                                       // anywhere in this file for mav_type_==12: ArduSub
+                                       // reports STANDBY(3)->ACTIVE(4) the same way Copter does
+                                       // (confirmed in ArduSub's vehicle_system_status()).
+            if ((current_fsm_state == ArdupilotInterfaceState::STARTED) && (current_time_us > (time_of_last_srv_req_us_ + ACTION_REQ_DELAY_SEC * 1000000))) {
+                // Same home-position re-validation as the Multicopter/Rover branches above.
+                bool home_valid = !(std::isnan(home_alt_) ||
+                    (std::abs(home_lat_) < 1e-6 && std::abs(home_lon_) < 1e-6));
+                if (!home_valid) {
+                    time_of_last_srv_req_us_ = current_time_us;
+                    bool position_valid = !(std::isnan(lat_) || std::isnan(lon_) || std::isnan(alt_) ||
+                        (std::abs(lat_) < 1e-6 && std::abs(lon_) < 1e-6));
+                    if (position_valid) {
+                        std::unique_lock<std::shared_mutex> lock(node_data_mutex_);
+                        home_lat_ = lat_;
+                        home_lon_ = lon_;
+                        home_alt_ = alt_;
+                        RCLCPP_WARN(this->get_logger(), "Home position re-validated: lat_ %.5f lon_ %.5f alt_ %.2f",
+                            home_lat_, home_lon_, home_alt_);
+                    } else {
+                        RCLCPP_WARN(this->get_logger(), "Waiting for a valid global position before arming sub...");
+                    }
+                } else {
+                    auto set_mode_request = std::make_shared<SetMode::Request>();
+                    set_mode_request->custom_mode = "GUIDED";
+                    time_of_last_srv_req_us_ = current_time_us;
+                    // If ArduSub rejects this (ModeGuided::init() checks position_ok(),
+                    // unlike arming which doesn't require it), current_fsm_state stays
+                    // STARTED and this whole branch just retries on the next loop
+                    // iteration once ACTION_REQ_DELAY_SEC elapses — no extra retry logic
+                    // needed (call_service_and_update_fsm only advances state on success).
+                    call_service_and_update_fsm<SetMode, autopilot_interface_msgs::action::Takeoff>(
+                        set_mode_client_, set_mode_request, goal_handle,
+                        "Request mode", ArdupilotInterfaceState::GUIDED_PRETAKEOFF);
+                }
+            } else if (current_fsm_state == ArdupilotInterfaceState::GUIDED_PRETAKEOFF) {
+                if (armed_flag_) {
+                    std::unique_lock<std::shared_mutex> lock(node_data_mutex_);
+                    aircraft_fsm_state_ = ArdupilotInterfaceState::ARMED;
+                } else if (current_time_us > (time_of_last_srv_req_us_ + ACTION_REQ_DELAY_SEC * 1000000)) {
+                    time_of_last_srv_req_us_ = current_time_us;
+                    auto arm_request = std::make_shared<CommandLong::Request>();
+                    arm_request->command = 400; // MAV_CMD_COMPONENT_ARM_DISARM
+                    arm_request->param1 = 1.0f;
+                    arm_request->param2 = 2989.0f; // force arm magic number (same as MAVProxy)
+                    command_long_client_->async_send_request(arm_request,
+                        [this](rclcpp::Client<CommandLong>::SharedFuture future) {
+                            RCLCPP_INFO(this->get_logger(), "Force arm (sub): %s",
+                                future.get()->success ? "accepted" : "rejected, retrying");
+                        });
+                }
+            } else if (current_fsm_state == ArdupilotInterfaceState::ARMED) {
+                // No climb to wait for — armed + GUIDED is the whole "takeoff" for a Sub.
+                feedback->message = "Sub armed and in GUIDED (no takeoff needed)";
                 goal_handle->publish_feedback(feedback);
                 taking_off = false;
             }

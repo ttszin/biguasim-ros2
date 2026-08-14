@@ -1,0 +1,62 @@
+# BiguaSim T2 SITL overrides for the BlueROV2 (ArduSub) — NAME VALUE format
+#
+# sim_vehicle.py -v ArduSub already loads ArduPilot's own generic
+# Tools/autotest/default_params/sub.parm as a base before this file is
+# applied on top (same --defaults-then---add-param-file layering already
+# confirmed live for the ArduCopter/Rover cases) — so, like
+# t2_biguasim_blueboat.parm, this starts close to empty and only grows once a
+# live test run shows a concrete need (motor-thrust mapping, EKF/depth
+# tuning, etc.).
+#
+# One exception, NOT left for live discovery: the scheduler loop-rate fix.
+# Confirmed by reading ardupilot/libraries/AP_Scheduler/AP_Scheduler.cpp:44-47
+# directly that SCHEDULER_DEFAULT_LOOP_RATE is 400 for ArduSub, same as
+# Copter (Rover is the outlier at 50) — i.e. ArduSub has the exact same
+# loop-rate mismatch against BiguaSim's real ~120-135Hz delivery rate that
+# broke DjiMatrice arming until t2_biguasim.parm's SCHED_LOOP_RATE fix. Set
+# proactively here, matching t2_sitl_run_bluerov2.sh's -A "--rate 120".
+SCHED_LOOP_RATE 120
+
+# Second exception, also NOT left for live discovery: the same EKF/GPS
+# health relaxation already proven necessary for the DjiMatrice
+# (t2_biguasim.parm's FS_EKF_ACTION/EK3_CHECK_SCALE/EK3_GLITCH_RAD) — found
+# live to block ArduSub too, in a way that's easy to misdiagnose. Confirmed
+# by reading ArduSub/system.cpp directly: Sub::ekf_position_ok() (called
+# from Sub::position_ok(), which ModeGuided::init() requires to be true)
+# returns false once armed unless AP_AHRS::Status::CONST_POS_MODE is clear —
+# i.e. the EKF must actively be trusting its configured position source
+# (GPS, the framework default for EK3_SRC1_POSXY, unchanged here). BiguaSim's
+# synthetic GPS produces the same transient jump/glitch behavior documented
+# in t2_biguasim.parm (fires around AHRS init, not just at the bridge-deck
+# level) — without this relaxation, the EKF intermittently falls back to
+# CONST_POS_MODE, position_ok() stays false, and every GUIDED mode-set
+# request is silently rejected by the firmware (MAVROS still reports
+# mode_sent: true — that only means the command was transmitted, not
+# accepted — confirmed live: mode stayed MANUAL, guided: false, no error
+# surfaced anywhere in ardupilot_interface, mission, or mavros logs).
+FS_EKF_ACTION 0
+EK3_CHECK_SCALE 200
+EK3_GLITCH_RAD 5
+
+# Third exception: root-caused via the dataflash log (mavlogdump.py --types
+# MSG, more reliable than the live MAVLink channel, which struggled with
+# request/response traffic all session). Every ArduSub session — default
+# GPS_TYPE, then GPS_TYPE=1 (AUTO), then GPS_TYPE=100 (SITL direct) — logs
+# "GPS 1: probing for u-blox/SITL at 230400 baud" exactly once and then NEVER
+# advances to "EKF3 IMUx is using GPS", no matter how long it runs. The
+# equivalent DjiMatrice/Copter session, same --model JSON setup, logs the
+# identical "probing for u-blox" line and completes in ~75s. So this is a
+# real ArduSub-specific GPS backend-detection bug in this environment, not an
+# EKF-tuning problem — none of EK3_SRC1_POSXY (already GPS, framework
+# default, confirmed no ArduSub override exists), the EKF-health params
+# above, nor GPS_TYPE 1 vs 100 change this outcome.
+#
+# Workaround, not a real fix: GPS_TYPE=14 (MAV) is the one GPS type whose
+# backend-selection (AP_GPS.cpp's _detect_instance()) explicitly bypasses the
+# stuck serial-probe path entirely — it just waits for MAVLink GPS_INPUT
+# (#232) messages instead. t2_gps_input_bridge_bluerov2.py closes the loop:
+# reads this same vehicle's own GLOBAL_POSITION_INT (already confirmed
+# reliable) and relays it straight back as a synthetic GPS_INPUT. Must be
+# run alongside the SITL/BiguaSim processes — see that script's docstring.
+GPS1_TYPE 14
+GPS_TYPE 14

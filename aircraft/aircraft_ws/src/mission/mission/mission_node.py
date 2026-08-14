@@ -881,8 +881,12 @@ class MissionNode(Node):
             # mechanism ardupilot_interface.cpp already uses for 'quad' in this altitude
             # range — the altitude field below is simply ignored by Rover firmware (no
             # z-axis control loop), so no separate code path is needed on either side.
-            if os.getenv('DRONE_TYPE', '') not in ('quad', 'rover'):
-                self.get_logger().warn("Reposition action is only supported for 'quad'/'rover' drone type. Skip.")
+            # 'sub' (BlueROV2/ArduSub position-hold test): same mechanism again, but here
+            # altitude is a real depth target (negative = below home) — ardupilot_interface.cpp's
+            # set_reposition_callback routes mav_type_==12 through this same branch
+            # unconditionally, regardless of altitude sign.
+            if os.getenv('DRONE_TYPE', '') not in ('quad', 'rover', 'sub'):
+                self.get_logger().warn("Reposition action is only supported for 'quad'/'rover'/'sub' drone type. Skip.")
                 self.mission_step += 1
                 return
             req = SetReposition.Request()
