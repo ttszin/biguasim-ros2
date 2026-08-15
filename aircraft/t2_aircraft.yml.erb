@@ -26,6 +26,15 @@ name: t2_bridge
 
 windows:
 
+  # mavros window's conn_timeout is raised to 60s (real ROS2 param, sys_status
+  # plugin, node /mavros/sys, default 10.0 -- confirmed via mavros source, not
+  # guessed) below. BiguaSim/Unreal's first-frame shader-compile stall (see
+  # biguasim_bridge/README.md) can starve ArduSub's own CPU for well over 10s
+  # at a time on this machine, which stops heartbeats long enough for MAVROS
+  # to declare "Lost connection, HEARTBEAT timed out" and drop -- a real,
+  # reproducible symptom, but a consequence of BiguaSim being slow, not an
+  # actual MAVLink failure. This is a band-aid for that specific class of
+  # stall, not a fix for the underlying slowness.
   - mavros:
       layout: even-horizontal
       panes:
@@ -33,7 +42,8 @@ windows:
           ros2 launch mavros apm.launch fcu_url:=tcp://127.0.0.1:5760@ 2>&1 | grep --line-buffered -v "RTT too high" &
           until ros2 topic echo /mavros/state --once 2>/dev/null | grep -q "connected: true"; do sleep 1; done &&
           echo "MAVROS connected." &&
-          ros2 service call /mavros/set_stream_rate mavros_msgs/srv/StreamRate "{stream_id: 0, message_rate: 10, on_off: true}"
+          ros2 service call /mavros/set_stream_rate mavros_msgs/srv/StreamRate "{stream_id: 0, message_rate: 10, on_off: true}" &&
+          ros2 param set /mavros/sys conn_timeout 60.0
 
   - ardupilot_interface:
       layout: even-horizontal
@@ -51,5 +61,5 @@ windows:
         - >
           until ros2 topic echo /mavros/state --once 2>/dev/null | grep -q "connected: true"; do sleep 1; done &&
           until ros2 topic echo /mavros/state --once 2>/dev/null | grep -qE "system_status: (3|4)"; do sleep 1; done &&
-          echo "FCU ready, starting mission." &&
-          DRONE_TYPE=<%= drone_type %> DRONE_ID=<%= drone_id %> ros2 run mission mission --conops <%= conops %> --ros-args -r __ns:=/Drone<%= drone_id %>
+          echo "FCU ready. Run the mission when you want it:" &&
+          echo "DRONE_TYPE=<%= drone_type %> DRONE_ID=<%= drone_id %> ros2 run mission mission --conops <%= conops %> --ros-args -r __ns:=/Drone<%= drone_id %>"

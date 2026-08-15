@@ -704,21 +704,78 @@ validated, since BlueROVHeavy shares ArduSub with it and TorpedoAUV uses a
 different `control_abstraction` (`cmd_rudders_sterns_motor_speed`) needing
 its own investigation.
 
-## Position-hold for BlueROV2 (ArduSub) — real crash bug found and fixed; a second, separate hang remains
+## Position-hold for BlueROV2 (ArduSub) — live end-to-end validation achieved
 
-**Status: `ardupilot_interface.cpp`/`mission_node.py`/scripts all implemented
-and code-reviewed correct. The deterministic SIGSEGV that blocked every
-`cmd_motor_speeds` spawn attempt (12+ across two sessions) was root-caused
-to a real bug in BiguaSim's own Python package — a shared-memory command
-buffer allocated with the wrong size — and fixed, confirmed live (2000
-ticks, zero crashes, using the unmodified real bridge code, no workaround).
-That fix lives in `~/biguasim` (a separate repo from this one) and needs to
-be preserved there independently. Live GUIDED-mode position-hold over a
-real ArduPilot SITL bridge is still not confirmed end-to-end: retrying the
-full pipeline after the fix hit a second, different, still-unexplained
-Unreal Engine hang (no crash signature, just stalls) — see "The real fix"
-below for the full root-cause story, and "The Unreal Engine hang" further
-below for what's already been ruled out for this second issue.**
+**Status: real ArduSub GUIDED position-hold over a live SITL bridge, driven
+by `mission_node.py` (not the decorative `bluerov0` prop), confirmed live
+on 2026-08-15 — two consecutive mission runs on the same
+`ardupilot_interface` process, no `Goal rejected`, `/mavros/state` confirmed
+`armed: true` / `guided: true` / `mode: GUIDED` after each takeoff (not just
+`mode_sent: true`). This was blocked for most of this section's history by a
+chain of five real, independent bugs, all now found and fixed:**
+
+1. **Buffer-size mismatch (fixed, confirmed live).** The deterministic
+   SIGSEGV that blocked every `cmd_motor_speeds` spawn attempt was a
+   shared-memory command buffer allocated with the wrong size in BiguaSim's
+   own Python package. Fixed, confirmed live (2000 ticks, zero crashes,
+   unmodified real bridge code). Lives in `~/biguasim` (separate repo),
+   needs to be preserved there independently. See "The real fix" below.
+2. **What was called a "second, separate hang" above was never a hang —
+   it's a Vulkan out-of-memory crash, and the "MAVLink connection unblocks
+   it" theory below (kept for the record) was flat-out wrong.** Reading
+   `Saved/Crashes/crashinfo-*/CrashContext.runtime-xml` (never checked
+   before — everything above was inferred from the stdout log alone, which
+   turned out to be misleadingly block-buffered and froze mid-line well
+   before the process actually died) showed the real error: `Fatal error:
+   [VulkanMemory.cpp] [Line: 1989] Out of memory on Vulkan;
+   MemoryTypeIndex=1, AllocSize=128.000MB`, crashing inside UE5's RDG
+   transient-resource heap allocator on the very first frame's render
+   setup (`FRDGBuilder::Execute` → `FVulkanTransientResourceAllocator::
+   CreateBuffer`) — a real `SIGSEGV`, confirmed via the crash context's own
+   `<CrashSignal>11</CrashSignal>`, just one that produced no text in the
+   log we'd been watching. Total VRAM wasn't exhausted at the time (5.4GB
+   free of 6GB on this laptop's RTX 3050) — this looks like a specific
+   Vulkan memory-type/heap limit UE5's transient allocator hits on this
+   GPU, not simple memory pressure. **Mitigated, not fully fixed**: added
+   `r.RDG.TransientAllocator=0` to the packaged build's
+   `Saved/Config/Linux/Engine.ini` (falls back to the regular pooled RHI
+   allocator, avoiding this specific heap) — confirmed live this measurably
+   helps (the crash point moved from the very first PSO batch to several
+   seconds/PSO-batches later), but a recurrence of the same class of crash
+   was still hit further into startup in the one longer test run so far.
+   Needs more live iterations to tell whether that recurrence is the same
+   bug elsewhere or new. See "Root-caused: a real segfault" below, now
+   superseded in its "second hang" framing by this finding.
+3. **`t2_gps_input_bridge_bluerov2.py` was contending with MAVROS for the
+   same MAVLink port (fixed).** Confirmed live: with this script also
+   connected to port 5760 (SERIAL0, MAVROS's own primary link),
+   `/mavros/state` froze at `connected: false` indefinitely — ArduPilot's
+   SITL TCP serial emulation only actively services one client per port.
+   Fixed by moving the script to port 5762 (SERIAL1, ArduPilot's own
+   separate telemetry port, already listening by default) and by
+   explicitly requesting the `GLOBAL_POSITION_INT` stream via
+   `MAV_CMD_SET_MESSAGE_INTERVAL` (SITL doesn't auto-stream position data
+   to a link unless a client asks, which MAVProxy/MAVROS/QGC normally do
+   automatically and this raw-pymavlink script didn't). Confirmed live:
+   `sysid=1` (real heartbeat) and GPS_INPUT sends flowing, versus `sysid=0`
+   (silent timeout) before the fix.
+4. **Rerunning a mission a second time got `Goal rejected :(` on
+   `Step 0: Takeoff` (fixed, confirmed live).** See "Pre-flight reset"
+   below — `ardupilot_interface.cpp`'s FSM never returned to `STARTED` on
+   its own after a finished action left the vehicle armed/active. New
+   `PRE_FLIGHT_RESET` state disarms and confirms standby before accepting
+   a fresh takeoff.
+5. **Takeoff declared success before GUIDED mode actually took effect, a
+   real race condition (fixed, confirmed live).** See "GUIDED confirmation"
+   below — `SetMode`'s `mode_sent: true` only means the request was
+   transmitted, not accepted; the FSM advanced on that alone and
+   `mission_node.py` started sending waypoints while the vehicle was still
+   in `MANUAL`. Now waits for `/mavros/state` to confirm the mode before
+   declaring the action done.
+
+Live GUIDED-mode position-hold over a real ArduPilot SITL bridge **is now
+confirmed end-to-end** — see the live validation note below bugs #4/#5 for
+the exact result.
 
 Investigated first (two Explore-agent passes, file:line-grounded) whether
 ArduSub needs a structurally different mechanism than Rover did. Findings,
@@ -1082,6 +1139,70 @@ fresh reboot, now that the underlying memory-safety bug is fixed** — every
 earlier hang could have been either bug; from here on, a hang is
 unambiguously the second, still-unexplained one, and a clean run
 plausibly validates the whole pipeline end to end.
+
+### Pre-flight reset: rerunning a mission no longer requires restarting the container
+
+Found live: rerunning `mission_node.py` a second time (same `ardupilot_interface`
+process, same SITL session) got `Goal rejected :(` on `Step 0: Takeoff`, because
+the vehicle was left armed/active by the first run — `ardupilot_interface.cpp`'s
+`aircraft_fsm_state_` isn't reset back to `STARTED` when an action finishes
+(every action handler clears `active_srv_or_act_flag_` but leaves
+`aircraft_fsm_state_` wherever that action landed, e.g. `ARMED`), and
+`takeoff_handle_goal` rejected outright on any non-`STARTED` state.
+
+Fixed server-side (`ardupilot_interface.cpp`), not client-side — the FSM's
+`aircraft_fsm_state_` is private, so `mission_node.py` has no way to reset it
+even if it disarmed the vehicle itself first; `takeoff_handle_goal`'s check
+would still see a stale non-`STARTED` state and reject. New `PRE_FLIGHT_RESET`
+FSM state: `takeoff_handle_goal` now accepts (instead of rejecting) whenever
+`active_srv_or_act_flag_` was free the instant before — which is only ever
+true when nothing is genuinely mid-flight, so any non-`STARTED`
+`aircraft_fsm_state_` at that point is guaranteed leftover from a finished
+run. `takeoff_handle_accepted` then disarms via `/mavros/cmd/arming` (retried
+every `ACTION_REQ_DELAY_SEC`, same pattern as every other step in this file),
+optionally requests `MANUAL` mode for Rover/Sub, and waits for
+`armed_flag_ == false` + standby before falling through to the normal
+per-`mav_type_` takeoff sequence.
+
+**Confirmed live working** for the reset itself: rerunning the mission a
+second time no longer gets `Goal rejected :(` on `Step 0: Takeoff`.
+
+**Found live once that worked: a second, real race condition, now also
+fixed.** After `PRE_FLIGHT_RESET` cleared and the normal Rover/Sub takeoff
+sequence armed the vehicle, `GUIDED_PRETAKEOFF` advanced to `ARMED` purely on
+`armed_flag_` — it never confirmed the earlier `SetMode("GUIDED")` request
+had actually taken effect (`mode_sent: true` only means the command was
+*transmitted*, not accepted — same caveat already documented for the
+`STARTED` branch's own GUIDED request, just missed here). `ARMED` then
+declared the Takeoff action done unconditionally. Symptom, confirmed live:
+`mission_node.py` started sending waypoints the instant Takeoff reported
+success, but the vehicle was still in `MANUAL` and ignored them — worked on
+a second consecutive mission run only because GUIDED happened to catch up in
+the meantime. Fixed in both the Rover (`mav_type_==10`) and Sub
+(`mav_type_==12`) `ARMED` branches identically: only declare the Takeoff
+action complete once `ardupilot_mode_ == "GUIDED"` is confirmed via
+`/mavros/state`, re-requesting the mode (same `ACTION_REQ_DELAY_SEC` retry
+pattern used everywhere else in this file) until it sticks.
+
+**Confirmed live, both fixes together, two consecutive mission runs on the
+same `ardupilot_interface` process (2026-08-15):** first run went
+`STARTED` → armed → `"Sub armed and confirmed in GUIDED"` feedback →
+`go_to_known_gps_waypoint` succeeded → wait → `Mission Complete`, FSM left
+at `ARMED`. Second run, same command, same terminal, no restart: no
+`Goal rejected`, `PRE_FLIGHT_RESET` disarmed and confirmed standby, then the
+same GUIDED-confirmed takeoff sequence ran cleanly again. `/mavros/state`
+verified directly after each takeoff: `armed: true`, `guided: true`,
+`mode: GUIDED` — not just `mode_sent: true`. This is the first time this
+whole section's actual goal (real ArduSub GUIDED position-hold over a live
+SITL bridge, driven by `mission_node.py`, not the decorative `bluerov0`)
+has been confirmed reachable at all.
+
+Position-hold quality itself still needs real tuning work: over the ~150s
+hold in the first run, altitude only moved from the ~584-585m baseline to
+582.97m and back to 584.22m by the end (well short of the mission's -3m/3m
+depth-change target), and `angular_vel` briefly showed large swings
+(tens of deg/s) after arming. Worth investigating next, but out of scope for
+this race-condition fix.
 
 ### Next steps for whoever picks this back up
 

@@ -64,6 +64,8 @@ using namespace std::chrono_literals; // for time literals (e.g. 1s)
 
 enum class ArdupilotInterfaceState {
     STARTED,
+    PRE_FLIGHT_RESET, // Disarming a vehicle left armed/active by a previous, already-
+                       // finished-or-aborted mission run, before a fresh takeoff proceeds.
     GUIDED_PRETAKEOFF,
     ARMED,
     MC_HOVER,

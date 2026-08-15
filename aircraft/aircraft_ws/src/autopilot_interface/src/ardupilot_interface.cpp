@@ -1002,27 +1002,51 @@ rclcpp_action::GoalResponse ArdupilotInterface::takeoff_handle_goal(const rclcpp
 {
     std::unique_lock<std::shared_mutex> lock(node_data_mutex_); // Use unique_lock for data writes
     RCLCPP_INFO(this->get_logger(), "takeoff_handle_goal");
-    if (aircraft_fsm_state_ != ArdupilotInterfaceState::STARTED) {
-        RCLCPP_ERROR(this->get_logger(), "Takeoff rejected, ArdupilotInterface is not in STARTED state");
+
+    // Check this first: active_srv_or_act_flag_ is the actual "is a flight/action
+    // genuinely in progress" signal. Every action handler resets it to false on
+    // completion (success, failure, or cancel) but leaves aircraft_fsm_state_
+    // wherever that action landed (e.g. ARMED after a Sub/Rover "takeoff", LANDED
+    // after a landing, MC_ORBIT/FW_CRUISE after orbit/offboard) — there was
+    // previously no way back to STARTED from those unless the vehicle happened to
+    // already be disarmed (state_callback's narrower recovery, below). So once we
+    // know no other action is active, any non-STARTED aircraft_fsm_state_ here is
+    // guaranteed to be leftover from a previous, already-finished-or-aborted run —
+    // never a flight genuinely in progress — and is safe to reset from.
+    if (active_srv_or_act_flag_.exchange(true)) {
+        RCLCPP_ERROR(this->get_logger(), "Another service/action is active");
         return rclcpp_action::GoalResponse::REJECT;
     }
+
+    bool needs_pre_flight_reset = (aircraft_fsm_state_ != ArdupilotInterfaceState::STARTED);
+
     // mav_state 3 = MAV_STATE_STANDBY (Multicopter/VTOL before arming). Rover
     // firmware doesn't report STANDBY the same way — confirmed live it reports
     // 4 = MAV_STATE_ACTIVE from startup, disarmed, in MANUAL mode (no separate
     // "standby until armed" state like Copter). Same relaxation applied to
     // t2_aircraft.yml.erb's mission-start gate, which hit the identical issue.
-    if (mav_state_ != 3 && !(mav_type_ == 10 && mav_state_ == 4)) {
+    // Skipped when a pre-flight reset is needed: the vehicle is expected to be
+    // armed/active right now (that's the whole reason for the reset) — this gets
+    // re-checked properly, post-disarm, in takeoff_handle_accepted's
+    // PRE_FLIGHT_RESET branch before it ever requests GUIDED.
+    if (!needs_pre_flight_reset && mav_state_ != 3 && !(mav_type_ == 10 && mav_state_ == 4)) {
         RCLCPP_ERROR(this->get_logger(), "Takeoff rejected, mav_state_ is not standby/active-rover (%d)", mav_state_);
+        active_srv_or_act_flag_.store(false);
         return rclcpp_action::GoalResponse::REJECT;
     }
-    if (active_srv_or_act_flag_.exchange(true)) {
-        RCLCPP_ERROR(this->get_logger(), "Another service/action is active");
-        return rclcpp_action::GoalResponse::REJECT;
-    }
+
     home_lat_ = lat_;
     home_lon_ = lon_;
     home_alt_ = alt_;
     RCLCPP_WARN(this->get_logger(), "Saved home_lat_: %.5f, home_lon_ %.5f, home_alt_ %.2f", home_lat_, home_lon_, home_alt_);
+
+    if (needs_pre_flight_reset) {
+        RCLCPP_WARN(this->get_logger(),
+            "ArdupilotInterface not in STARTED state (%s) — vehicle likely left armed/active "
+            "by a previous run; disarming before this takeoff proceeds",
+            fsm_state_to_string(aircraft_fsm_state_).c_str());
+        aircraft_fsm_state_ = ArdupilotInterfaceState::PRE_FLIGHT_RESET;
+    }
     return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
 }
 rclcpp_action::CancelResponse ArdupilotInterface::takeoff_handle_cancel(const std::shared_ptr<rclcpp_action::ServerGoalHandle<autopilot_interface_msgs::action::Takeoff>> goal_handle)
@@ -1067,7 +1091,42 @@ void ArdupilotInterface::takeoff_handle_accepted(const std::shared_ptr<rclcpp_ac
         }
         uint64_t current_time_us = this->get_clock()->now().nanoseconds() / 1000;  // Convert to microseconds
 
-        if (mav_type_ == 2) { // Multicopter
+        if (current_fsm_state == ArdupilotInterfaceState::PRE_FLIGHT_RESET) {
+            // Vehicle was left armed/active by a previous, already-finished-or-aborted
+            // run (see takeoff_handle_goal) — disarm and wait for MAVROS to confirm it
+            // before falling through to the normal per-mav_type takeoff sequence below.
+            // Rover (mav_type_==10) never reports STANDBY(3) even disarmed — same
+            // exception used throughout this file — so accept ACTIVE(4) there too.
+            bool disarm_confirmed = !armed_flag_ &&
+                (mav_state_ == 3 || (mav_type_ == 10 && mav_state_ == 4));
+            if (disarm_confirmed) {
+                feedback->message = "Pre-flight reset complete";
+                goal_handle->publish_feedback(feedback);
+                std::unique_lock<std::shared_mutex> lock(node_data_mutex_);
+                aircraft_fsm_state_ = ArdupilotInterfaceState::STARTED;
+            } else if (current_time_us > (time_of_last_srv_req_us_ + ACTION_REQ_DELAY_SEC * 1000000)) {
+                time_of_last_srv_req_us_ = current_time_us;
+                auto disarm_request = std::make_shared<CommandBool::Request>();
+                disarm_request->value = false;
+                arming_client_->async_send_request(disarm_request,
+                    [this](rclcpp::Client<CommandBool>::SharedFuture future) {
+                        RCLCPP_INFO(this->get_logger(), "Pre-flight reset disarm: %s",
+                            future.get()->success ? "accepted" : "rejected, retrying");
+                    });
+                // Best-effort, fire-and-forget mode change back to a safe disarmed
+                // default — not required for disarm_confirmed above and not retried
+                // on its own; some firmwares refuse CommandBool disarm from certain
+                // guided/auto modes, so this gives disarm a better chance of sticking.
+                // "MANUAL" is correct for Rover/Sub (mav_type_ 10/12); Copter/VTOL's
+                // equivalent is "STABILIZE", so only send it for the vehicles it's
+                // actually valid for.
+                if (mav_type_ == 10 || mav_type_ == 12) {
+                    auto set_mode_request = std::make_shared<SetMode::Request>();
+                    set_mode_request->custom_mode = "MANUAL";
+                    set_mode_client_->async_send_request(set_mode_request);
+                }
+            }
+        } else if (mav_type_ == 2) { // Multicopter
             if ((current_fsm_state == ArdupilotInterfaceState::STARTED) && (current_time_us > (time_of_last_srv_req_us_ + ACTION_REQ_DELAY_SEC * 1000000))) {
                 // home_lat_/home_lon_/home_alt_ were saved in takeoff_handle_goal, but
                 // /mavros/global_position/global may not have published a real fix yet at
@@ -1284,9 +1343,28 @@ void ArdupilotInterface::takeoff_handle_accepted(const std::shared_ptr<rclcpp_ac
                 }
             } else if (current_fsm_state == ArdupilotInterfaceState::ARMED) {
                 // No climb to wait for — armed + GUIDED is the whole "takeoff" for a Rover.
-                feedback->message = "Rover armed and in GUIDED (no takeoff needed)";
-                goal_handle->publish_feedback(feedback);
-                taking_off = false;
+                // GUIDED_PRETAKEOFF only requested the mode once and moved on as soon as
+                // armed_flag_ went true — it never actually confirmed GUIDED took effect.
+                // SetMode's "success"/mode_sent field only means the command was
+                // transmitted, not accepted (same caveat as the STARTED branch's GUIDED
+                // request above) — found live: mission_node.py started sending waypoints
+                // the instant this action reported success, but the vehicle was still in
+                // MANUAL, so it ignored them. Confirm ardupilot_mode_ too before declaring
+                // done; keep re-requesting GUIDED until state_callback confirms it.
+                if (ardupilot_mode_ == "GUIDED") {
+                    feedback->message = "Rover armed and confirmed in GUIDED";
+                    goal_handle->publish_feedback(feedback);
+                    taking_off = false;
+                } else if (current_time_us > (time_of_last_srv_req_us_ + ACTION_REQ_DELAY_SEC * 1000000)) {
+                    time_of_last_srv_req_us_ = current_time_us;
+                    auto set_mode_request = std::make_shared<SetMode::Request>();
+                    set_mode_request->custom_mode = "GUIDED";
+                    set_mode_client_->async_send_request(set_mode_request,
+                        [this](rclcpp::Client<SetMode>::SharedFuture future) {
+                            RCLCPP_INFO(this->get_logger(), "Confirm GUIDED (rover): %s",
+                                future.get()->mode_sent ? "sent" : "rejected, retrying");
+                        });
+                }
             }
         } else if (mav_type_ == 12) { // Sub (e.g. BlueROV2): same "no real takeoff" shape as
                                        // Rover above — arms and enters GUIDED, then declares
@@ -1348,9 +1426,24 @@ void ArdupilotInterface::takeoff_handle_accepted(const std::shared_ptr<rclcpp_ac
                 }
             } else if (current_fsm_state == ArdupilotInterfaceState::ARMED) {
                 // No climb to wait for — armed + GUIDED is the whole "takeoff" for a Sub.
-                feedback->message = "Sub armed and in GUIDED (no takeoff needed)";
-                goal_handle->publish_feedback(feedback);
-                taking_off = false;
+                // Same confirmation gap as the Rover branch above, found live: this used
+                // to declare success as soon as armed_flag_ went true, without ever
+                // checking ardupilot_mode_ — mission_node.py then sent waypoints while the
+                // vehicle was still in MANUAL and it ignored them. Confirm the mode too.
+                if (ardupilot_mode_ == "GUIDED") {
+                    feedback->message = "Sub armed and confirmed in GUIDED";
+                    goal_handle->publish_feedback(feedback);
+                    taking_off = false;
+                } else if (current_time_us > (time_of_last_srv_req_us_ + ACTION_REQ_DELAY_SEC * 1000000)) {
+                    time_of_last_srv_req_us_ = current_time_us;
+                    auto set_mode_request = std::make_shared<SetMode::Request>();
+                    set_mode_request->custom_mode = "GUIDED";
+                    set_mode_client_->async_send_request(set_mode_request,
+                        [this](rclcpp::Client<SetMode>::SharedFuture future) {
+                            RCLCPP_INFO(this->get_logger(), "Confirm GUIDED (sub): %s",
+                                future.get()->mode_sent ? "sent" : "rejected, retrying");
+                        });
+                }
             }
         } else {
             // Unsupported mav_type reaching this loop: fail closed instead of hanging forever.
@@ -1421,6 +1514,7 @@ std::string ArdupilotInterface::fsm_state_to_string(ArdupilotInterfaceState stat
 {
     switch (state) {
         case ArdupilotInterfaceState::STARTED: return "STARTED";
+        case ArdupilotInterfaceState::PRE_FLIGHT_RESET: return "PRE_FLIGHT_RESET";
         case ArdupilotInterfaceState::GUIDED_PRETAKEOFF: return "GUIDED_PRETAKEOFF";
         case ArdupilotInterfaceState::ARMED: return "ARMED";
         case ArdupilotInterfaceState::MC_HOVER: return "MC_HOVER";
