@@ -772,10 +772,39 @@ chain of five real, independent bugs, all now found and fixed:**
    `mission_node.py` started sending waypoints while the vehicle was still
    in `MANUAL`. Now waits for `/mavros/state` to confirm the mode before
    declaring the action done.
+6. **ArduSub itself was stuck at ~90%+ CPU with zero progress — not a
+   hang, an infinite loop inside a firmware panic handler (fixed, confirmed
+   live).** Root-caused via `sudo gdb -p <ardusub_pid> -batch -ex "thread
+   apply all bt"` (this process is a normal user process, not sandboxed —
+   ptrace works fine on it, unlike the Unreal/BiguaSim process): the main
+   thread was inside `AP_HAL::panic()`, called from
+   `AP_AHRS::update_state()`. `AP_AHRS.cpp` has a SITL-only sanity check
+   (`#if CONFIG_HAL_BOARD == HAL_BOARD_SITL`) that panics if the EKF
+   reports `location_ok=true` for a `Location` where lat/lng/alt are all
+   exactly zero (`Location::initialised()`, `Location.h`, treats an
+   all-zero triple as "not initialised"). `AP_HAL_SITL/system.cpp`'s
+   `panic()` prints the message, dumps a stack trace/core file, and then —
+   since `SITL_PANIC_EXIT` isn't set anywhere in this setup — does a
+   literal `for(;;);`, forever, no sleep. This was a direct consequence of
+   bug #3's own fix: the GPS bootstrap relay's first message is
+   unavoidably `(0,0)` for lat/lon (that's genuinely what ArduSub reports
+   before its first fix), and if `alt` happens to be exactly `0` at that
+   same instant, all three fields are zero at once and this fires. Fixed
+   by nudging the relayed altitude to `0.01` (physically meaningless, just
+   never exactly zero) whenever lat/lon/alt would otherwise all be zero
+   together.
+7. **MAVROS's default `conn_timeout` (10s) was shorter than BiguaSim's own
+   first-frame stall can last, causing spurious `Lost connection, HEARTBEAT
+   timed out` drops unrelated to any real MAVLink failure (mitigated).**
+   Raised to 60s in `t2_aircraft.yml.erb` (real ROS2 param, `sys_status`
+   plugin, node `/mavros/sys` — confirmed via MAVROS source, not guessed).
+   A band-aid for bug #2's remaining stall, not a fix for it.
 
 Live GUIDED-mode position-hold over a real ArduPilot SITL bridge **is now
-confirmed end-to-end** — see the live validation note below bugs #4/#5 for
-the exact result.
+confirmed reachable end-to-end** (mission runs to completion, no rejected
+goals) — but **position-hold quality itself is not yet validated; see
+"Position-hold quality: not yet confirmed stable" near the end of this
+section.**
 
 Investigated first (two Explore-agent passes, file:line-grounded) whether
 ArduSub needs a structurally different mechanism than Rover did. Findings,
@@ -1197,12 +1226,94 @@ whole section's actual goal (real ArduSub GUIDED position-hold over a live
 SITL bridge, driven by `mission_node.py`, not the decorative `bluerov0`)
 has been confirmed reachable at all.
 
-Position-hold quality itself still needs real tuning work: over the ~150s
-hold in the first run, altitude only moved from the ~584-585m baseline to
-582.97m and back to 584.22m by the end (well short of the mission's -3m/3m
-depth-change target), and `angular_vel` briefly showed large swings
-(tens of deg/s) after arming. Worth investigating next, but out of scope for
-this race-condition fix.
+### Position-hold quality: not yet confirmed stable
+
+Over the ~150s hold in the first successful run, altitude only moved from
+the ~584-585m baseline to 582.97m and back to 584.22m by the end (well
+short of the mission's -3m/3m depth-change target), and `angular_vel`
+briefly showed large swings (tens of deg/s) after arming.
+
+A second successful run (same day, bugs #6/#7 above) completed with no
+errors (`Mission Complete`, all 3 steps ran) but was checked again ~9
+minutes later, with nothing commanding the vehicle in the meantime: `NED
+vel` had reached tens to hundreds of m/s, `angular_vel` tens to ~150 rad/s,
+`true_airspeed_m_s` over 160 — completely non-physical for this vehicle.
+Whether this divergence happens *during* the hold or only accumulates
+*after* the mission stops sending setpoints (most likely, since nothing
+holds GUIDED's target once the mission's own commanding stops) is not
+determined — the tmux pane's scrollback history had already rolled past
+the state at the exact `Mission Complete` timestamp by the time this was
+checked. Re-running with a live logger capturing `/mavros/local_position/
+velocity_local` and `/pose` at a fixed rate for the *entire* mission
+(not just spot-checked afterward) is the right way to actually answer
+this, and was in progress when this note was written but blocked by
+another BiguaSim startup stall (below) before a clean end-to-end trace was
+captured.
+
+This is real tuning work (EKF source config, or the underlying vehicle
+dynamics/damping in BiguaSim's own physics model), separate from every
+bug in this section so far — none of bugs #1-#7 are expected to fix it.
+
+### The recurring BiguaSim startup stall: contributing factor found, not fixed
+
+Bugs #1-#7 above are all confirmed fixed. The one thing in this whole
+section still not root-caused is the *variance* in how long BiguaSim/Unreal
+takes to get through its first frame after spawn (bug #2's mitigation
+narrowed how often this ends in an outright crash, but a plain stall,
+GPU pinned at 0%/P8, can still last anywhere from under a second to 9+
+minutes on the same unmodified code path). A concrete contributing factor
+was found live on 2026-08-15, ~16.5 hours into one very long session: only
+1.9GB of the laptop's 6GB VRAM was free (`nvidia-smi`), well below the
+~5GB+ free seen right after a fresh reboot earlier the same day. GPU memory
+appears to leak somewhat across repeated BiguaSim/Unreal launches even
+when every process is cleanly killed and `/dev/shm` cleared between runs —
+consistent with driver-level state (this session separately found 100+
+open `/dev/nvidia0` file descriptors on a single Holodeck process) not
+being fully released. **Not confirmed as the sole cause** — a run with
+similarly low free VRAM has also completed quickly before — but it's the
+most concrete, checkable difference found between a run that stalled for
+9+ minutes and one that broke through in seconds. Whoever picks this back
+up: check `nvidia-smi`'s free VRAM before a long test session, and prefer
+starting from a fresh reboot if it's been many hours/many launches since
+the last one.
+
+### Known-good command sequence (confirmed live, 2026-08-15)
+
+```bash
+# Terminal 1 — SITL
+bash aircraft/aircraft_resources/missions/t2_sitl_run_bluerov2.sh
+
+# Terminal 2 — BiguaSim (wait for Terminal 1 to be listening on 5760 first;
+# this window will show progress then go idle/GPU-0% for a while — see
+# "The recurring BiguaSim startup stall" above, this is currently normal)
+cd aircraft/aircraft_resources/missions
+python3 biguasim_sim_runner_bluerov2.py --viewport
+
+# Terminal 3 — MAVROS + mission container (this is what unblocks Terminal 1's
+# ArduSub from its own internal wait, which is itself needed before it opens
+# SERIAL1/5762 for Terminal 4 below)
+docker run --rm -it --network host \
+  -e T2_CONOPS=/aas/aircraft_resources/missions/t2_bluerov2_hold_test.yaml \
+  -e T2_DRONE_TYPE=sub \
+  -v $(pwd)/aircraft/t2_aircraft.yml.erb:/aas/t2_aircraft.yml.erb \
+  -v $(pwd)/aircraft/aircraft_ws/src/autopilot_interface:/aas/aircraft_ws/src/autopilot_interface \
+  -v $(pwd)/aircraft/aircraft_ws/src/mission:/aas/aircraft_ws/src/mission \
+  -v $(pwd)/aircraft/aircraft_resources/missions:/aas/aircraft_resources/missions \
+  --name t2_bluerov2_mission \
+  --entrypoint bash aircraft-image \
+  -c "source /opt/ros/humble/setup.bash && cd /aas/aircraft_ws && colcon build --packages-select autopilot_interface mission && source install/setup.bash && tmuxinator start -p /aas/t2_aircraft.yml.erb"
+
+# Terminal 4 — GPS_INPUT bootstrap bridge (wait for port 5762 to open first,
+# which only happens once Terminal 3's MAVROS connects to Terminal 1)
+cd aircraft/aircraft_resources/missions
+python3 t2_gps_input_bridge_bluerov2.py
+
+# Once all of the above are up and MAVROS shows connected:true, the `mission`
+# tmux window (inside the Terminal 3 container) prints the ready-to-run
+# mission command instead of auto-starting it (t2_aircraft.yml.erb was
+# changed to do this) -- copy/paste it, or re-run it again later the same
+# way to test bug #4's fix (PRE_FLIGHT_RESET) without restarting anything.
+```
 
 ### Next steps for whoever picks this back up
 
