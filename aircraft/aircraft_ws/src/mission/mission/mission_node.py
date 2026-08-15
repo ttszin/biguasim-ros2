@@ -16,6 +16,7 @@ from action_msgs.msg import GoalStatus
 from sensor_msgs.msg import NavSatFix
 from std_msgs.msg import String
 from mavros_msgs.msg import VfrHud, ExtendedState
+from mavros_msgs.srv import SetMode
 from geometry_msgs.msg import Point
 from vision_msgs.msg import Detection2DArray
 try:
@@ -265,6 +266,15 @@ class MissionNode(Node):
             self._speed_client = None
             self._reposition_client = None
             self.get_logger().info("DRONE_ID not set, service clients not created.")
+
+        # Direct MAVROS service, not per-drone-namespaced like the two above
+        # (MAVROS itself isn't launched per-drone in this setup -- same
+        # convention as the /mavros/... topic subscriptions elsewhere in
+        # this file). Only meaningfully used for Sub -- see the "Mission
+        # Complete" handling below.
+        self._set_mode_client = self.create_client(
+            SetMode, '/mavros/set_mode', callback_group=self.service_callback_group
+        )
 
     def px4_global_position_callback(self, msg): # Mutally exclusive with mavros_global_position_callback
         with self.data_lock:
@@ -818,6 +828,35 @@ class MissionNode(Node):
                 self.get_logger().info("Mission Failed")
             else:
                 self.get_logger().info("Mission Complete")
+                # Found live (BlueROV2/ArduSub): a GUIDED-mode vehicle left
+                # with nothing actively commanding it after the mission
+                # ends doesn't hold its position -- ArduSub's own
+                # GUIDED::init() only holds momentarily, not indefinitely
+                # against disturbance, once nothing keeps refreshing the
+                # setpoint. Confirmed live: angular_vel reached ~-171/565/
+                # -950 rad/s (genuinely spinning) about 12 minutes after a
+                # clean Mission Complete with no new commands. POSHOLD is
+                # ArduSub's own dedicated mode for holding position
+                # against disturbance without external commanding (unlike
+                # GUIDED, its controller runs entirely in the firmware) --
+                # request it, best-effort, only for Sub (POSHOLD doesn't
+                # exist for Copter/Rover/VTOL). Not done for mav_type_==10
+                # (Rover): the Rover hold test's own scope intentionally
+                # ends without disarm/land, matching real usage where a
+                # surface vehicle isn't expected to fight ambient current
+                # the way GUIDED alone was found to fail at underwater.
+                if os.getenv('DRONE_TYPE', '') == 'sub' and self._set_mode_client is not None:
+                    if self._set_mode_client.wait_for_service(timeout_sec=2.0):
+                        request = SetMode.Request()
+                        request.custom_mode = "POSHOLD"
+                        future = self._set_mode_client.call_async(request)
+                        rclpy.spin_until_future_complete(self, future, timeout_sec=3.0)
+                        if future.done() and future.result() is not None and future.result().mode_sent:
+                            self.get_logger().info("Requested POSHOLD after mission completion")
+                        else:
+                            self.get_logger().warn("POSHOLD request after mission completion did not confirm sent")
+                    else:
+                        self.get_logger().warn("/mavros/set_mode not available, could not request POSHOLD")
             self.conops_timer.cancel()
             rclpy.shutdown()
             return

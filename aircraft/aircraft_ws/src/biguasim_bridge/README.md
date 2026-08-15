@@ -704,15 +704,17 @@ validated, since BlueROVHeavy shares ArduSub with it and TorpedoAUV uses a
 different `control_abstraction` (`cmd_rudders_sterns_motor_speed`) needing
 its own investigation.
 
-## Position-hold for BlueROV2 (ArduSub) — live end-to-end validation achieved
+## Position-hold for BlueROV2 (ArduSub) — mission runs end-to-end; one stability bug open
 
-**Status: real ArduSub GUIDED position-hold over a live SITL bridge, driven
-by `mission_node.py` (not the decorative `bluerov0` prop), confirmed live
-on 2026-08-15 — two consecutive mission runs on the same
-`ardupilot_interface` process, no `Goal rejected`, `/mavros/state` confirmed
-`armed: true` / `guided: true` / `mode: GUIDED` after each takeoff (not just
-`mode_sent: true`). This was blocked for most of this section's history by a
-chain of five real, independent bugs, all now found and fixed:**
+**Status (2026-08-15): the mission pipeline itself is solid — arm, GUIDED
+confirmed, waypoint, hold, `Mission Complete`, no `Goal rejected`, no
+`Lost connection`, no `AP_HAL::panic()` — across nine real bugs found and
+fixed (list below). The vehicle no longer diverges *during* the hold
+(bug #8's fix). But it is not yet a validated stable hold end to end: a
+second, slower instability (bug #9, still open) makes the vehicle spin up
+well after the mission stops actively commanding it. Don't read this
+section as "done" — read "Position-hold quality" near the end for the
+current honest state.**
 
 1. **Buffer-size mismatch (fixed, confirmed live).** The deterministic
    SIGSEGV that blocked every `cmd_motor_speeds` spawn attempt was a
@@ -802,9 +804,11 @@ chain of five real, independent bugs, all now found and fixed:**
 
 Live GUIDED-mode position-hold over a real ArduPilot SITL bridge **is now
 confirmed reachable end-to-end** (mission runs to completion, no rejected
-goals) — but **position-hold quality itself is not yet validated; see
-"Position-hold quality: not yet confirmed stable" near the end of this
-section.**
+goals) — and the fast, exponential *during-hold* divergence bugs #1-#7
+left open is now also root-caused and fixed (bug #8). A second, slower
+instability (bug #9) is still open. See **"Position-hold quality: one real
+instability root-caused and fixed, a second still open"** near the end of
+this section for the full, current, honest state.
 
 Investigated first (two Explore-agent passes, file:line-grounded) whether
 ArduSub needs a structurally different mechanism than Rover did. Findings,
@@ -1226,33 +1230,94 @@ whole section's actual goal (real ArduSub GUIDED position-hold over a live
 SITL bridge, driven by `mission_node.py`, not the decorative `bluerov0`)
 has been confirmed reachable at all.
 
-### Position-hold quality: not yet confirmed stable
+### Position-hold quality: one real instability root-caused and fixed, a second still open
 
-Over the ~150s hold in the first successful run, altitude only moved from
-the ~584-585m baseline to 582.97m and back to 584.22m by the end (well
-short of the mission's -3m/3m depth-change target), and `angular_vel`
-briefly showed large swings (tens of deg/s) after arming.
+**Bug #8: the GPS_INPUT relay was self-referential, and this was a real
+closed-loop instability, not just a stale/noisy estimate (found and fixed
+live, 2026-08-15).** `t2_gps_input_bridge_bluerov2.py` relays ArduSub's own
+`GLOBAL_POSITION_INT` — the EKF's *estimate* — back to it as "GPS". With no
+independent ground truth ever entering the loop, any EKF drift gets
+reported back as if it were confirmed truth; the position controller
+applies real thrust to correct the now-reinforced (but fictional) error;
+that real thrust produces real motion; the IMU picks up that real motion
+and feeds it back into the same EKF. Nothing external ever pulls the
+estimate back toward the vehicle's actual position. Confirmed live, twice:
+numerically, `velocity_local`'s lateral component grew ~exponentially
+during an active hold (12 → 17 → 23 → 32 → 42 → 52 → 62 → 73 m/s over
+105s, `t2_bluerov2_hold_test.yaml`'s step 2); and visually, watching the
+BiguaSim viewport — the vehicle climbed out of the water, tipped hard to
+one side, fell, briefly looked like it was damping out ("like a PID
+settling"), then resumed listing to the same side until it drifted into
+the world's bridge geometry.
 
-A second successful run (same day, bugs #6/#7 above) completed with no
-errors (`Mission Complete`, all 3 steps ran) but was checked again ~9
-minutes later, with nothing commanding the vehicle in the meantime: `NED
-vel` had reached tens to hundreds of m/s, `angular_vel` tens to ~150 rad/s,
-`true_airspeed_m_s` over 160 — completely non-physical for this vehicle.
-Whether this divergence happens *during* the hold or only accumulates
-*after* the mission stops sending setpoints (most likely, since nothing
-holds GUIDED's target once the mission's own commanding stops) is not
-determined — the tmux pane's scrollback history had already rolled past
-the state at the exact `Mission Complete` timestamp by the time this was
-checked. Re-running with a live logger capturing `/mavros/local_position/
-velocity_local` and `/pose` at a fixed rate for the *entire* mission
-(not just spot-checked afterward) is the right way to actually answer
-this, and was in progress when this note was written but blocked by
-another BiguaSim startup stall (below) before a clean end-to-end trace was
-captured.
+**Fixed** by sourcing GPS_INPUT from BiguaSim's own simulation ground
+truth instead: `biguasim_sim_runner_bluerov2.py` already computes
+`bridge.build_json_state()['position']` / `['velocity']` every tick (from
+the agent's own `LocationSensor`/`VelocitySensor`, converted via
+`frame.py`'s `pos_nwu_to_ap()`/`vel_nwu_to_ned()`) to feed ArduSub's JSON
+physics link — it just was never also sent as `GPS_INPUT`. Now it is,
+directly from this same process, on the same SERIAL1/5762 link
+`t2_gps_input_bridge_bluerov2.py` used to own — which is no longer needed
+at all (dropped from the 4-terminal sequence; that script is kept only for
+reference/comparison). This is a real, independent position source (the
+simulation's own truth), so it can actually correct drift the way a real
+GPS would, instead of just amplifying it.
 
-This is real tuning work (EKF source config, or the underlying vehicle
-dynamics/damping in BiguaSim's own physics model), separate from every
-bug in this section so far — none of bugs #1-#7 are expected to fix it.
+**Confirmed fixed for the fast, exponential, during-hold divergence**: a
+full mission run with this fix — arm, `GUIDED` confirmed (took ~330s this
+run to clear `Sub::position_ok()`'s alignment gate, longer than the ~90s
+seen before but the same class of wait, not a new problem), `go_to_known_
+gps_waypoint`, 180s hold, `Mission Complete` — logged `NED vel` bounded to
+roughly ±0.1-2 m/s and `true_airspeed_m_s` around 1.4-1.8 the entire time,
+including 15s after `Mission Complete`, where it was *decreasing* toward
+zero rather than diverging. Coordinates stayed near BiguaSim's real GPS
+origin (`33.8105, -118.3939`) throughout, never drifting into the
+fractional-degree-per-tick runaway the old relay produced.
+
+**Bug #9 (open, not fixed — one hypothesis tried and ruled out): a second
+instability shows up in `angular_vel` (roll/pitch/yaw rate), independent
+of `NED pos`/`NED vel` staying reasonably bounded.** First seen checking a
+run roughly 12 minutes after `Mission Complete`, nothing having sent a new
+setpoint since: `angular_vel` had reached roughly -171/565/-950 rad/s —
+genuinely spinning, confirmed live in the viewport ("gira infinitamente").
+ArduSub itself was healthy throughout (0% CPU, no panic-loop recurrence of
+bug #6) — a real vehicle-dynamics/control instability, not a firmware or
+bridge hang.
+
+**Tried: `mission_node.py` now requests `POSHOLD` (a real ArduSub mode,
+`Mode::Number::POSHOLD`, `ArduSub/mode.h:364` — holds position using the
+firmware's own controller, no external commanding needed, unlike GUIDED)
+right after `Mission Complete`, gated to `DRONE_TYPE == sub` only (POSHOLD
+doesn't exist for Copter/Rover/VTOL).** Confirmed live: mode genuinely
+switches (`/mavros/state` showed `mode: POSHOLD`). **Did not fix bug #9** —
+`angular_vel` was already large and noisy (tens to ~200 rad/s across axes)
+within 15s of the mode switch, not after several minutes like the first
+observation. This rules out "GUIDED specifically needs continuous
+commanding" as the root cause — the instability persists in a mode whose
+entire job is fighting disturbance without external input, so it's likely
+in the attitude/rate controller itself or in BiguaSim's own simulated
+vehicle dynamics, not in anything about how long GUIDED goes uncommanded.
+Kept the POSHOLD-on-completion change anyway (leaving Sub in GUIDED forever
+after a mission ends is bad practice regardless of whether it turned out to
+be bug #9's cause), just don't read it as a fix for this specific bug.
+
+Also noted, now reproduced on a second, independent run:
+`biguasim_sim_runner_bluerov2.py` itself was found pinned at ~90%+ CPU
+(different runs: 94% with 26+ min accumulated, 92% with 14+ min
+accumulated) — well above its normal idle-between-ticks footprint. Both
+times this was caught, it correlates with the run in question also
+showing `angular_vel` instability, but correlation isn't established as
+causation yet. Worth checking directly (not yet done) whether the
+per-tick `GPS_INPUT` send added by bug #8's fix is itself the source of
+that CPU load, and if so whether it's purely wasted overhead or is
+somehow perturbing the tick loop's timing enough to feed into bug #9.
+
+Needs, in order: (1) directly profile why `biguasim_sim_runner_bluerov2.py`
+runs hot, since that's now a reproducible, checkable lead, unlike the
+vaguer "ambient disturbance" theory it initially looked like; (2) a live
+attitude/angular-velocity logger running for the *entire* test (not spot-
+checked) to nail down exactly when the growth starts, now that POSHOLD
+ruled out "only after mission ends" as the trigger.
 
 ### The recurring BiguaSim startup stall: contributing factor found, not fixed
 
@@ -1279,19 +1344,28 @@ the last one.
 
 ### Known-good command sequence (confirmed live, 2026-08-15)
 
+Down to 3 terminals since bug #8's fix — `biguasim_sim_runner_bluerov2.py`
+now sends `GPS_INPUT` itself (from BiguaSim's own ground truth), so the old
+Terminal 4 (`t2_gps_input_bridge_bluerov2.py`, the self-referential relay)
+isn't part of the normal flow anymore. That script is kept only for
+reference/comparison to bug #8's fix, not as something to run alongside.
+
 ```bash
 # Terminal 1 — SITL
 bash aircraft/aircraft_resources/missions/t2_sitl_run_bluerov2.sh
 
 # Terminal 2 — BiguaSim (wait for Terminal 1 to be listening on 5760 first;
 # this window will show progress then go idle/GPU-0% for a while — see
-# "The recurring BiguaSim startup stall" above, this is currently normal)
+# "The recurring BiguaSim startup stall" above, this is currently normal.
+# It also opens its own second MAVLink link, on SERIAL1/5762, to send
+# ground-truth GPS_INPUT once that port is available -- retried lazily
+# from inside the tick loop, doesn't block waiting for it)
 cd aircraft/aircraft_resources/missions
 python3 biguasim_sim_runner_bluerov2.py --viewport
 
 # Terminal 3 — MAVROS + mission container (this is what unblocks Terminal 1's
 # ArduSub from its own internal wait, which is itself needed before it opens
-# SERIAL1/5762 for Terminal 4 below)
+# SERIAL1/5762 for Terminal 2's GPS_INPUT link above)
 docker run --rm -it --network host \
   -e T2_CONOPS=/aas/aircraft_resources/missions/t2_bluerov2_hold_test.yaml \
   -e T2_DRONE_TYPE=sub \
@@ -1302,11 +1376,6 @@ docker run --rm -it --network host \
   --name t2_bluerov2_mission \
   --entrypoint bash aircraft-image \
   -c "source /opt/ros/humble/setup.bash && cd /aas/aircraft_ws && colcon build --packages-select autopilot_interface mission && source install/setup.bash && tmuxinator start -p /aas/t2_aircraft.yml.erb"
-
-# Terminal 4 — GPS_INPUT bootstrap bridge (wait for port 5762 to open first,
-# which only happens once Terminal 3's MAVROS connects to Terminal 1)
-cd aircraft/aircraft_resources/missions
-python3 t2_gps_input_bridge_bluerov2.py
 
 # Once all of the above are up and MAVROS shows connected:true, the `mission`
 # tmux window (inside the Terminal 3 container) prints the ready-to-run
