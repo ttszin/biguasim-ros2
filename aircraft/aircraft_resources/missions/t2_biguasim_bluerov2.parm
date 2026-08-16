@@ -81,3 +81,35 @@ GPS_TYPE 14
 PSC_D_POS_P 1.5
 PSC_D_VEL_P 4.0
 PSC_NE_POS_P 0.7
+
+# Halving the P gains above barely reduced the overshoot (6.6m peak vs
+# 7.55m before, same order of magnitude) -- confirmed live. Re-checked
+# which integral term is actually live: PSC_D_VEL_I defaults to 0.0f
+# (AC_PosControl.cpp:360, `_pid_vel_d_m(POSCONTROL_D_VEL_P, 0.0f, 0.0f,
+# 0.0f, ...)`), not overridden by ArduPilot's own default_params/sub.parm
+# either -- cutting it would be a no-op. The integral terms actually in
+# effect come from that same sub.parm (loaded as the base layer before
+# this file): PSC_D_ACC_I=0.4 (vertical acceleration loop) and
+# PSC_NE_VEL_I=0.5 (horizontal velocity loop), both real, both plausible
+# contributors to the windup-driven overshoot. Cutting both as the next
+# test.
+PSC_D_ACC_I 0.1
+PSC_NE_VEL_I 0.15
+
+# Confirmed live: cutting the integral terms above barely changed the
+# overshoot either (~7.0m peak, same order of magnitude again) -- three
+# separate PID-gain interventions in a row (P halved, I cut) all failed to
+# meaningfully help, which is itself evidence the overshoot isn't really a
+# feedback-gain problem. Checked the feedforward trajectory shaping
+# instead: WP_SPD (`AC_WPNav.cpp`, `WP_SPD_DEFAULT = 10.0f`) is ArduSub's
+# compiled default *horizontal* cruise speed between waypoints -- 10 m/s,
+# not overridden anywhere (checked ArduPilot's own default_params/sub.parm
+# too). Braking distance from 10 m/s at the default WP_ACC=2.5 m/s^2 is
+# v^2/(2a) = 20 metres -- four times this test's entire 5m displacement.
+# No tracking-PID gain can fix an overshoot whose root cause is the
+# feedforward speed profile itself commanding a cruise speed the vehicle
+# can't stop from in the available distance. (The vertical equivalent,
+# WP_SPD_DN=1.5 m/s @ WP_ACC=2.5 m/s^2, only gives a ~0.45m braking
+# distance -- doesn't by itself explain the ~7m depth overshoot, so the
+# depth axis likely has a separate/additional cause not yet found.)
+WP_SPD 1.0

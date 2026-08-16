@@ -706,14 +706,22 @@ its own investigation.
 
 ## Position-hold for BlueROV2 (ArduSub) — mission runs end-to-end; one stability bug open
 
-**Status (2026-08-16): a real, structural physics bug in BiguaSim's own
-buoyancy model was found and fixed today — the vehicle no longer porpoises
-in and out of the water forever (see "2026-08-16: buoyancy bug" near the
-end). What's left is a control-tuning problem: a real position/depth
-target still produces a large, underdamped overshoot that can capsize the
-vehicle. Bug #9 (rotation instability well after a mission ends) is
-unchanged from 2026-08-15, still open. Don't read this section as "done" —
-read "2026-08-16" and "Position-hold quality" near the end for the current
+**Status (2026-08-16, end of day): a real, structural physics bug in
+BiguaSim's own buoyancy model was found and fixed — the vehicle no longer
+porpoises in and out of the water forever (see "2026-08-16: buoyancy bug"
+near the end). Four separate PID-gain interventions (position P, velocity
+P, two different integral terms, one feedforward speed cap) each failed to
+fix the remaining position/depth overshoot, which was itself the clue:
+found and fixed a likely root cause tonight — BlueROV2's `motor_signs` in
+`~/biguasim` had every motor's sign backward, confirmed via an isolated
+(no-SITL) simulation showing "forward" commands producing backward thrust
+and "ascend" producing downward thrust. **Not yet confirmed live** — the
+one live test after applying it showed tumbling, and it's not yet known
+whether that's the sign fix being wrong/incomplete or bug #9's
+already-documented rotation instability confounding the result. See
+"2026-08-16 evening" near the end for the full trail and the next
+disambiguating test to run. Don't read this section as "done" — read both
+2026-08-16 sections and "Position-hold quality" near the end for the current
 honest state.**
 
 1. **Buffer-size mismatch (fixed, confirmed live).** The deterministic
@@ -1470,6 +1478,104 @@ accumulated in one sweep today). Full cleanup needs all of:
 after, not just the pkill exit code (SIGKILL to a process already in the
 uninterruptible-sleep tail of exiting can appear to fail on the first
 check and be gone a moment later).
+
+### 2026-08-16 evening: two more real gain bugs found (WP_SPD, PSC integral terms), then the actual root cause -- a global motor-sign inversion
+
+Two more PID interventions tried and confirmed **not** to meaningfully fix
+the overshoot, following the same halved-P-gain result documented above:
+
+- **`PSC_D_ACC_I`/`PSC_NE_VEL_I` (integral terms) cut**, after finding the
+  gain everyone reaches for first (`PSC_D_VEL_I`) is a red herring: it
+  defaults to `0.0f` in the constructor
+  (`AC_PosControl.cpp:360`, `_pid_vel_d_m(POSCONTROL_D_VEL_P, 0.0f, 0.0f,
+  0.0f, ...)`) and isn't overridden anywhere, so touching it is a no-op.
+  The integral terms actually live come from ArduPilot's own
+  `default_params/sub.parm` (already loaded as this repo's base layer):
+  `PSC_D_ACC_I=0.4` (vertical acceleration loop) and `PSC_NE_VEL_I=0.5`
+  (horizontal velocity loop). Cut both (`0.1`/`0.15`) -- confirmed live,
+  overshoot barely changed (~7.0m peak, same order of magnitude again).
+- **`WP_SPD` (horizontal cruise speed) cut from its default 10 m/s to
+  1 m/s.** Braking distance from 10 m/s at the default `WP_ACC=2.5 m/s^2`
+  is `v^2/(2a) = 20m` -- four times this test's entire 5m displacement, a
+  real and independently-justified fix regardless of what follows below.
+  Confirmed live: this visibly smoothed the *horizontal* trajectory (a
+  steady, controlled ramp instead of an instant large jump) -- real
+  progress -- but did not fix the *vertical* overshoot (`WP_SPD` only
+  governs horizontal speed; the vertical equivalent, `WP_SPD_DN=1.5 m/s`
+  at `WP_ACC=2.5 m/s^2`, only allows a ~0.45m braking distance, too small
+  to explain a several-metre depth overshoot on its own) -- confirmed live,
+  peak depth still reached ~7.1m. Also revealed a *second* problem, only
+  visible once the trajectory stopped exploding fast enough to observe it
+  clearly: the horizontal position, even moving smoothly and slowly,
+  **never stopped at the target** -- east climbed steadily and without
+  bound (0 -> 6.4 -> 17.2m over tens of seconds, still climbing when
+  checked) rather than decelerating and holding. Four consecutive gain
+  interventions (P halved twice, two different I terms cut, one
+  feedforward speed cap fixed) each addressing a *magnitude* problem, none
+  fixing the actual behavior, was itself the signal that this was never a
+  tuning problem.
+
+**Root cause, found by testing direction instead of magnitude: BlueROV2's
+`motor_signs` in `~/biguasim`'s `vehicle.py` had the wrong sign for every
+motor.** Wrote an isolated test (no SITL, no live vehicle needed) that
+reproduces ArduSub's own `SUB_FRAME_VECTORED` per-motor factor table
+(`AP_Motors6DOF.cpp`'s `add_motor_raw_6dof()` calls for `SUB_FRAME_VECTORED`)
+directly in Python, mapped it through `vehicle.py`'s existing
+`motor_mapping=[5,4,1,0,3,2]`, and fed the result into
+`HexaCopterFiveDoF._compute_body_wrench()` (the actual, hardcoded
+`cmd_motor_speeds` mixing logic -- separate from the `TM_to_f`
+pseudo-inverse matrix built from `rotor_pos`, which isn't used by this
+control abstraction at all). With the original `motor_signs=[1]*6`:
+ArduSub's own "pure forward" motor pattern produced `Fx=-42.99` (backward),
+and its "pure ascend" pattern produced `Fz=-30.4` (downward) -- a clean,
+complete inversion on the tested axes, not a partial/mixed error. This
+exactly explains why every PID-gain change all day failed to fix the
+overshoot: a sign-inverted closed loop cannot be tuned into stability by
+adjusting gain magnitude -- larger gains just diverge faster in the wrong
+direction, smaller gains diverge slower, but it never converges regardless
+of P/I/speed-cap values, matching precisely what was observed (every
+intervention "barely changed" a problem of the same basic shape). Flipping
+all six `motor_signs` to `-1` (not a per-motor selective flip -- the
+inversion was uniform across every tested axis, consistent with an
+input-side sign convention mismatch rather than an individual miswired
+thruster) made the isolated simulation self-consistent: forward command ->
+forward force, ascend command -> upward force, lateral and yaw inverted
+together with them.
+
+**Not yet confirmed as the actual fix -- the one live test run after
+applying it showed the vehicle tumbling (roll/yaw rates 40-65 deg/s,
+quaternion reaching close to 180 deg on one axis) and drifting the wrong
+direction (north went negative, away from the +5m target) rather than
+holding steady.** Two explanations remain open and are NOT yet
+disambiguated: (a) the sign fix is wrong or incomplete (e.g. moments/yaw
+need a different treatment than forces, or there's a coupling the
+isolated single-axis test didn't exercise), or (b) the sign fix is correct
+for translation but a *separate*, pre-existing problem (bug #9's rotation
+instability, documented above as still-open, or a new/faster variant of
+it) is now dominating and masking any improvement, since a tumbling
+vehicle's body-frame "forward" no longer points toward world-frame north
+regardless of whether the thrust mixing itself is correct. Needs a test
+that isolates the two: e.g. a short burst of a single-axis velocity
+setpoint (bypassing `wp_nav`/`WP_SPD` entirely via
+`SET_POSITION_TARGET_LOCAL_NED` with only velocity fields un-ignored,
+streamed continuously since that guided sub-mode *does* have the 3s
+`GUIDED_POSVEL_TIMEOUT_MS` this repo's position-only path doesn't) checked
+over the first 1-2 seconds, before any tumbling has had time to develop --
+attempted live tonight but never got a clean run through, due to the
+engine-spawn hang (below) recurring repeatedly.
+
+BiguaSim's own engine-spawn hang (see "2026-08-16" above) also recurred
+several times this same evening, back-to-back, at a rate that felt higher
+than earlier in the day -- no new information on it beyond what's already
+documented; still not deterministic, still requires killing everything
+(full cleanup sequence above) and retrying. One operational lesson from
+tonight specifically: retrying quickly and repeatedly without carefully
+confirming each previous attempt's processes were *fully* dead first
+caused multiple overlapping SITL/BiguaSim instances to accumulate
+unnoticed (3 simultaneous `biguasim_sim_runner_bluerov2.py` processes
+found running at once at one point) -- always verify a clean `ps aux`
+sweep before starting a new attempt, not just after the intended cleanup
+command's exit code.
 
 ### The recurring BiguaSim startup stall: contributing factor found, not fixed
 
