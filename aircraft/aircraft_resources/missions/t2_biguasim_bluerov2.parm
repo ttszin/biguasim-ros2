@@ -60,3 +60,24 @@ EK3_GLITCH_RAD 5
 # run alongside the SITL/BiguaSim processes — see that script's docstring.
 GPS1_TYPE 14
 GPS_TYPE 14
+
+# Fourth exception: position-hold overshoot found live once the BiguaSim
+# buoyancy bug was fixed (see ~/biguasim's uuv.py -- peak buoyancy was
+# ~3.1x the vehicle's own weight, an excess force far beyond its thrust
+# authority, which caused a genuine surface-breach limit cycle no PID could
+# hold against). With that fixed (near-neutral buoyancy, ~2N excess), the
+# vehicle no longer porpoises out of the water, but still badly overshoots
+# a commanded depth/position target -- confirmed live: a -3.0m depth
+# target overshot to -7.55m before recovering, and a 5m-north/0m-east
+# target overshot to ~9.3m north/-20.8m east and held there instead of
+# correcting back. ArduSub's stock ArduSub-specific PSC gains (Parameters
+# read directly from AC_PosControl.cpp: PSC_D_POS_P=3.0, PSC_D_VEL_P=8.0,
+# PSC_NE_POS_P=1.0 defaults) are tuned for a real BlueROV2's real thrust/
+# drag response -- BiguaSim's simulated dynamics apparently respond
+# differently (faster/less damped), so the same gains produce a classic
+# underdamped step response with integrator windup. Halved the vertical
+# gains and mildly reduced the horizontal position gain as a first,
+# conservative pass -- NOT yet confirmed live, needs a fresh test run.
+PSC_D_POS_P 1.5
+PSC_D_VEL_P 4.0
+PSC_NE_POS_P 0.7

@@ -48,11 +48,21 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import time
+
+from pymavlink import mavutil
 
 from biguasim.ardubridge import ArduBiguaSimRunner
 from biguasim.ardubridge.vehicle import VEHICLE_REGISTRY
 
 DEFAULT_LOCATION = [25.0, 0.0, -1.0]
+
+# Ground-truth GPS_INPUT relay, ported from biguasim_sim_runner_bluerov2.py's
+# fix for bug #8 (self-referential GPS relay causing closed-loop
+# instability) -- this script predates that fix, so without this it hits
+# the same GPS_TYPE=14/no-fix stall as before that work.
+GPS_CONNECTION = "tcp:127.0.0.1:5762"
+GPS_RATE_HZ = 5.0
 
 # Vertical (heave) vs horizontal (surge/sway/yaw) motor index split, per
 # vehicle.py's motor_mapping=[5,4,1,0,3,2] comment ("sim actuators r1..r6 <-
@@ -117,6 +127,11 @@ def main() -> None:
         agent = runner._agent_name
         dt = runner._dt
 
+        gps = None
+        gps_period = 1.0 / GPS_RATE_HZ
+        last_gps_send = 0.0
+        last_gps_connect_attempt = 0.0
+
         bridge.bind()
         cmd = [0.0, 0.0, 0.0, 0.0]
         raw = env.step(cmd)
@@ -137,6 +152,32 @@ def main() -> None:
 
                 json_state = bridge.build_json_state(agent_state, sim_time)
                 bridge.send_state(json_state)
+
+                now = time.time()
+                if gps is None and now - last_gps_connect_attempt >= 2.0:
+                    last_gps_connect_attempt = now
+                    try:
+                        gps = mavutil.mavlink_connection(GPS_CONNECTION)
+                        gps.wait_heartbeat(timeout=2)
+                        print(f"[gps_ground_truth] Connected to {GPS_CONNECTION}, "
+                              f"sysid={gps.target_system} compid={gps.target_component}")
+                    except (ConnectionRefusedError, OSError):
+                        gps = None
+
+                if gps is not None:
+                    while gps.recv_match(blocking=False) is not None:
+                        pass
+
+                if gps is not None and json_state is not None and now - last_gps_send >= gps_period:
+                    last_gps_send = now
+                    lat, lon, alt = json_state["position"]
+                    vn, ve, vd = json_state["velocity"]
+                    gps.mav.gps_input_send(
+                        0, 0, 0, 0, 0, 3,
+                        int(lat * 1e7), int(lon * 1e7), alt,
+                        1.0, 1.0, vn, ve, vd,
+                        0.5, 1.0, 1.0, 10,
+                    )
 
                 if frame is not None and frame % 200 == 0:
                     print(f"  t={sim_time:.2f}s frame={frame} cmd_vel_yaw={[f'{v:.3f}' for v in cmd]}")

@@ -706,15 +706,15 @@ its own investigation.
 
 ## Position-hold for BlueROV2 (ArduSub) — mission runs end-to-end; one stability bug open
 
-**Status (2026-08-15): the mission pipeline itself is solid — arm, GUIDED
-confirmed, waypoint, hold, `Mission Complete`, no `Goal rejected`, no
-`Lost connection`, no `AP_HAL::panic()` — across nine real bugs found and
-fixed (list below). The vehicle no longer diverges *during* the hold
-(bug #8's fix). But it is not yet a validated stable hold end to end: a
-second, slower instability (bug #9, still open) makes the vehicle spin up
-well after the mission stops actively commanding it. Don't read this
-section as "done" — read "Position-hold quality" near the end for the
-current honest state.**
+**Status (2026-08-16): a real, structural physics bug in BiguaSim's own
+buoyancy model was found and fixed today — the vehicle no longer porpoises
+in and out of the water forever (see "2026-08-16: buoyancy bug" near the
+end). What's left is a control-tuning problem: a real position/depth
+target still produces a large, underdamped overshoot that can capsize the
+vehicle. Bug #9 (rotation instability well after a mission ends) is
+unchanged from 2026-08-15, still open. Don't read this section as "done" —
+read "2026-08-16" and "Position-hold quality" near the end for the current
+honest state.**
 
 1. **Buffer-size mismatch (fixed, confirmed live).** The deterministic
    SIGSEGV that blocked every `cmd_motor_speeds` spawn attempt was a
@@ -1319,6 +1319,158 @@ attitude/angular-velocity logger running for the *entire* test (not spot-
 checked) to nail down exactly when the growth starts, now that POSHOLD
 ruled out "only after mission ends" as the trigger.
 
+### 2026-08-16: a real physics bug found and fixed (buoyancy), a new control-tuning problem found (overshoot/capsize)
+
+**Engine-spawn hang, re-investigated: the earlier "Vulkan out-of-memory"
+diagnosis for the second hang (see "Root-caused: a real segfault" /
+`r.RDG.TransientAllocator=0` above) does not explain every occurrence.**
+Hit the identical-looking hang again today, live, 8 times in a row across
+every variant tried (`--viewport` on/off, the RDG mitigation, `cmd_vel_yaw`
+instead of `cmd_motor_speeds`) — same spawn point, GPU pinned at 0%/P8,
+process alive but producing nothing. This time, with the process still
+alive and stuck, `sudo gdb -p <holodeck_pid> -batch -ex "thread apply all
+bt"` (same technique as bug #6's panic-loop diagnosis — this process isn't
+sandboxed, unlike earlier assumptions) got a real answer instead of another
+guess: every worker thread was an ordinary idle Unreal thread pool waiting
+on its own condition variable, *except* the main game thread, which was
+blocked inside `UHolodeckServer::Acquire()` (`HolodeckServer.cpp:138`,
+called from `UHolodeckGameInstance::Tick()`) — a semaphore wait, the
+engine's half of the Python↔engine tick handshake
+(`BiguaSimClient.acquire()`/`.release()` in `biguasim/biguasimclient.py`).
+The Python side (`biguasim_sim_runner_bluerov2.py`) was independently
+confirmed blocked too (`do_poll` on its main thread), and confirmed to be
+running the *exact same, unmodified* loop structure
+(`bridge.bind()` → `env.step()` → the receive/step/send loop) that
+`ArduBiguaSimRunner.run()` and `biguasim_sim_runner_blueboat.py`/
+`biguasim_sim_runner.py` already use successfully for BlueBoat/DjiMatrice —
+ruling out a bug in our own Python loop. **Conclusion: this is a real
+deadlock in the compiled engine binary's spawn-to-first-tick handshake,
+specific to something about BlueROV2/BlueROVHeavy's spawn sequence** (very
+likely a sibling of the already-found buffer-size bug — same vehicles,
+same spawn-time window — but a different specific defect, since the buffer
+fix didn't prevent this). Not fixable from either repo without the actual
+engine source (confirmed unavailable, same as before). **Practical
+workaround: it's not deterministic** — a retry loop (kill everything,
+relaunch, repeat) eventually got through on the same day this was found.
+
+**The real fix: BiguaSim's own buoyancy model was structurally broken for
+this hull class.** Once a session finally got past the spawn hang, the
+live behavior matched exactly what earlier sessions described from memory
+(vehicle climbs out of the water, or dives and rockets back out,
+repeating) — but this time with bug #8's ground-truth GPS fix already in
+place, so it couldn't be blamed on GPS self-reference again. Read
+`biguasim/dynamics/uuv.py`'s `HexaCopterFiveDoF._compute_external_forces()`
+(the class BlueROV2 is built on) directly: buoyancy volume was computed
+from a solid-sphere approximation of the hull's outer envelope
+(`(4/3)*pi*rsphere**3`, `rsphere` from `(length+width)/4`) — physically
+wrong for an open-frame ROV that's mostly *not* solid, and it showed:
+peak buoyancy came out to `997 * 0.0329 m^3 * 9.80665 ≈ 321.6N`, a full
+**3.1x** BlueROV2's own weight (`10.5kg * 9.80665 ≈ 103.0N`) — an excess of
+~218.6N, far beyond the ~59N of vertical thrust the vehicle's own 2
+vertical rotors can produce (`k_eta=3.8e-4`, `rotor_speed_max=278.9 rad/s`
+→ ~29.6N/rotor). No PID could ever hold depth against a restoring force
+nearly 4x its own control authority. Made worse by how that buoyancy was
+gated: a hard `submerged_mask` cutoff at exactly 10cm depth (full weight,
+zero buoyancy above it; full-strength calculation below it) ramped from
+near-zero to that 3.1x-weight peak over an oddly-dimensioned
+`0.5*height*mass` transition band (`≈1.33m` for this vehicle) — so the
+vehicle sank near the surface (no buoyant support), then rocketed back up
+once past ~1.33m depth (excess force >> thrust), breached the surface
+where buoyancy vanished again, and repeated forever. The code's own
+comment on the ramp: `# a hack to generate a nice buoyancy behavior :)`.
+
+Fixed in `~/biguasim/src/biguasim/dynamics/uuv.py` (separate repo, needs
+committing there): buoyancy volume decoupled from the drag-sphere volume
+and sized from `mass/rho * 1.02` instead (≈0.0107 m³, ~2% positive
+buoyancy — matches how real ROVs are built, slightly positive for safety)
+— peak buoyancy is now ≈105.0N against ≈103.0N weight, a ~2N excess well
+within the ~59N thrust budget. The surface ramp was replaced with a smooth
+transition over one hull-height (half the hull's height above/below the
+surface = 0%/100% submerged), removing the hysteresis/hard-cutoff
+combination that made the old ramp behave like a discontinuous switch.
+**Confirmed live, twice: the infinite porpoising cycle is gone** — a
+depth/position target now produces one bounded transient (deep dive then
+recover, or a big lateral swing) that damps out and settles, not a
+repeating oscillation.
+
+**New problem, found live once the buoyancy bug stopped masking it: the
+position/depth controller still overshoots badly, and the vehicle can
+capsize during the overshoot.** A -3.0m depth target overshot to -7.55m
+before recovering in one run; -6.6m in a second run with the change below
+applied. A 5m-north/0m-east target overshot to roughly 9m north / -20m
+east (varies run to run) and *held there* instead of correcting back to
+the commanded point. In the second run, the vehicle's quaternion showed
+close to 180° of rotation once things settled — confirmed live in the
+viewport: it capsized during the aggressive correction and came to rest
+upside down. Two things were checked and ruled out or only partially
+addressed:
+- **Not a "GUIDED needs continuous streaming" problem.** Checked directly
+  against ArduSub's own source (`ArduSub/mode_guided.cpp`):
+  `GUIDED_POSVEL_TIMEOUT_MS` (3000ms, would abandon a stale target and
+  freeze lean angles/climb rate) only applies to the *velocity* guided
+  sub-modes (`guided_vel_control_run`/`guided_posvel_control_run`). The
+  plain position target this code sends (`GlobalPositionTarget` with
+  `IGNORE_VX/VY/VZ` set, landing in `guided_pos_control_run`) has no
+  timeout logic at all — it just runs `wp_nav.update_wpnav()` toward the
+  last-set destination every loop, indefinitely, whether or not new
+  messages keep arriving. A single `set_reposition` call (already how
+  `ardupilot_interface.cpp` does it) should be enough by ArduSub's own
+  design.
+- **Tried, didn't fix it: halving the vertical PSC gains.** ArduSub's
+  compiled defaults for Sub (`AC_PosControl.cpp`, `APM_BUILD_ArduSub`
+  branch) are `PSC_D_POS_P=3.0`, `PSC_D_VEL_P=8.0`, `PSC_NE_POS_P=1.0` —
+  but ArduPilot's own `Tools/autotest/default_params/sub.parm` (loaded as
+  the base layer before this repo's own `.parm` file, confirmed still
+  true today) already overrides the horizontal ones much higher
+  (`PSC_NE_POS_P=2.5`, `PSC_NE_VEL_P=5.0`) for its own SITL testing —
+  i.e. even ArduPilot's own reference tuning isn't the plain compiled
+  default, and isn't tuned against BiguaSim's dynamics either. Added
+  `PSC_D_POS_P=1.5`, `PSC_D_VEL_P=4.0`, `PSC_NE_POS_P=0.7` to
+  `t2_biguasim_bluerov2.parm` (confirmed actually applied live via
+  `ros2 param get /mavros/param PSC_D_POS_P`, so this isn't a stale-eeprom
+  issue) — the depth overshoot was barely smaller (6.6m peak vs 7.55m
+  before, same order of magnitude), so a simple P-gain reduction alone
+  isn't the real fix. No `.parm` file for BlueROV2 specifically exists
+  anywhere checked (not in ArduPilot's own tree, not in BiguaSim's docs) —
+  BlueRobotics' real hardware ships close to ArduSub's compiled defaults
+  because it was tuned against the *real* vehicle's *real* thrust/drag
+  response; nobody has tuned against BiguaSim's simulated response before,
+  since this is the first time this exact combination has been driven
+  through a real waypoint (earlier "position holds fine" observations were
+  all at/near the spawn point, never a real displacement target).
+
+**Not yet investigated: whether this is actually a position-controller
+tuning problem at all, or an attitude-control/motor-mixing one.** The
+capsize is the more suspicious data point — a pure Z or NE position-gain
+overshoot shouldn't by itself flip the vehicle over; that smells more like
+roll/pitch authority getting overwhelmed during the aggressive correction,
+or a motor-mixing/allocation issue that only shows up under large combined
+thrust demands (never exercised before now, since earlier tests never
+commanded a real displacement). Worth checking next: log attitude
+(roll/pitch, not just yaw) through an aggressive reposition, and check
+`ATC_` (attitude controller) gains alongside `PSC_`/`WPNAV_` ones.
+
+**Process-hygiene bugs found live today, fixed in how this section's own
+command sequence should be cleaned up between attempts** (not code bugs,
+operator error worth documenting so the next person doesn't repeat it):
+`pkill -9 -f "Holodeck Bridge"` and `pkill -9 -f "ardusub"` are not
+enough — `sim_vehicle.py`'s `xterm -hold ... ardusub` wrapper survives the
+inner `ardusub` binary being killed (that's what `-hold` is for), leaking
+an idle `xterm` plus, on the *next* launch, a second `sim_vehicle.py`/
+`ardusub` pair competing for the same ports; and `/dev/shm` cleanup needs
+`sem.HOLODECK_LOADING_SEM*` alongside the already-documented
+`HOLODECK_MEM*`/`sem.HOLODECK_SEMAPHORE_*` globs, or old sessions' shared
+memory/semaphores accumulate indefinitely (four full stale sets were found
+accumulated in one sweep today). Full cleanup needs all of:
+`pkill -9 -f "sim_vehicle.py"`, `pkill -9 -f "bin/ardusub"`,
+`pkill -9 -f "xterm.*ArduSub"`, `pkill -9 -f "Holodeck Bridge"`,
+`pkill -9 -f "biguasim_sim_runner"`, then
+`rm -f /dev/shm/HOLODECK_MEM* /dev/shm/sem.HOLODECK_SEMAPHORE_*
+/dev/shm/sem.HOLODECK_LOADING_SEM*` — and verify with `ps aux`/`nvidia-smi`
+after, not just the pkill exit code (SIGKILL to a process already in the
+uninterruptible-sleep tail of exiting can appear to fail on the first
+check and be gone a moment later).
+
 ### The recurring BiguaSim startup stall: contributing factor found, not fixed
 
 Bugs #1-#7 above are all confirmed fixed. The one thing in this whole
@@ -1385,6 +1537,13 @@ docker run --rm -it --network host \
 ```
 
 ### Next steps for whoever picks this back up
+
+**Superseded by "2026-08-16" above — SITL live validation *was* reached
+since this was written** (multiple full end-to-end mission runs, the
+buoyancy bug found and fixed, the GPS/GUIDED fix below confirmed working).
+Kept for the historical reasoning trail, but don't start here; start from
+"2026-08-16"'s overshoot/capsize problem, which is the actual current
+blocker.
 
 1. **First, just retry.** The confirmed memory-safety bug (buffer size 6
    vs the engine's required 8) is fixed in `~/biguasim`'s `agents.py` —
