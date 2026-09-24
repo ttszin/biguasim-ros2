@@ -153,12 +153,28 @@ class HoverStabilityLogger(Node):
                 "  horizontal pos stddev: %.3f m\n"
                 "  vertical   pos stddev: %.3f m\n"
                 "  peak |roll|:  %.2f deg\n"
-                "  peak |pitch|: %.2f deg"
+                "  peak |pitch|: %.2f deg\n"
+                "  --- drift (start -> end / worst point of the settled window) ---\n"
+                "  horizontal drift: %.3f m end, %.3f m worst\n"
+                "  vertical   drift: %+.3f m end, %+.3f m worst (+ = up, - = down)\n"
+                "  yaw        drift: %+.2f deg end, %+.2f deg worst"
                 % (len(settled), summary['horiz_std'], summary['vert_std'],
-                   summary['peak_roll'], summary['peak_pitch'])
+                   summary['peak_roll'], summary['peak_pitch'],
+                   summary['horiz_drift_end_m'], summary['horiz_drift_max_m'],
+                   summary['vert_drift_end_m'], summary['vert_drift_max_m'],
+                   summary['yaw_drift_end_deg'], summary['yaw_drift_max_deg'])
             )
         self.get_logger().info(f"Raw samples saved to '{self._out_path}'.")
         rclpy.try_shutdown()
+
+
+def _yaw_delta_deg(a: float, b: float) -> float:
+    """Shortest signed angular distance b-a, wrapped to [-180, 180] —
+    stddev/max-abs on raw yaw_deg would be meaningless across the 359->0
+    wrap this vehicle sits right on top of (heading near 0/360 throughout
+    this session's tests)."""
+    d = (b - a + 180.0) % 360.0 - 180.0
+    return d
 
 
 def _summarize(rows: list[tuple]) -> dict:
@@ -168,17 +184,39 @@ def _summarize(rows: list[tuple]) -> dict:
     zs = [r[3] for r in rows]
     rolls = [r[7] for r in rows]
     pitches = [r[8] for r in rows]
+    yaws = [r[9] for r in rows]
 
     def stddev(vals):
         mean = sum(vals) / n
         return math.sqrt(sum((v - mean) ** 2 for v in vals) / n)
 
     horiz_std = math.sqrt(stddev(xs) ** 2 + stddev(ys) ** 2)
+
+    # 2026-08-30: drift metrics, added alongside the pre-existing stddev
+    # ones -- this whole session's actual failure mode was slow, sustained
+    # CREEP (position/depth/heading walking away over tens of seconds:
+    # buoyancy excess, yaw positive-feedback, GUIDED losing its setpoint
+    # without a refresh), not high-frequency noise. Stddev over a run that
+    # drifts monotonically can look deceptively small/large depending on
+    # the window and doesn't distinguish "jittery but centered" from
+    # "smooth one-way walk" -- report start->end and start->worst-point
+    # directly instead of inferring it from stddev.
+    x0, y0, z0, yaw0 = xs[0], ys[0], zs[0], yaws[0]
+    horiz_dist = [math.hypot(x - x0, y - y0) for x, y in zip(xs, ys)]
+    z_delta = [z - z0 for z in zs]
+    yaw_delta = [_yaw_delta_deg(yaw0, yw) for yw in yaws]
+
     return {
         'horiz_std': horiz_std,
         'vert_std': stddev(zs),
         'peak_roll': max(abs(r) for r in rolls),
         'peak_pitch': max(abs(p) for p in pitches),
+        'horiz_drift_end_m': horiz_dist[-1],
+        'horiz_drift_max_m': max(horiz_dist),
+        'vert_drift_end_m': z_delta[-1],
+        'vert_drift_max_m': max(z_delta, key=abs),
+        'yaw_drift_end_deg': yaw_delta[-1],
+        'yaw_drift_max_deg': max(yaw_delta, key=abs),
     }
 
 

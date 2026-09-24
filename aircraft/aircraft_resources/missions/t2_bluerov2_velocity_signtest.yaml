@@ -1,0 +1,17 @@
+steps:
+  # Arm + GUIDED only, same as t2_bluerov2_hold_test.yaml's first step --
+  # takeoff_altitude is ignored for Sub, GUIDED just holds wherever it is.
+  - action: takeoff
+    params:
+      takeoff_altitude: 0.0
+
+  # No go_to_known_gps_waypoint on purpose: this file exists specifically
+  # to test motor-sign correctness via a raw velocity setpoint published
+  # manually (ros2 topic pub /mavros/setpoint_raw/local) during this wait
+  # window, bypassing wp_nav/WP_SPD entirely -- isolates "do the motors
+  # respond in the right direction" from "does position-hold converge",
+  # which stayed entangled in every full-mission test today. Long enough
+  # to comfortably fit a manual test; not meant to run to completion.
+  - action: wait
+    params:
+      duration: 300.0

@@ -232,3 +232,4 @@ class ShapeTargetDetector:
         self._last_position = (cx, cy)
         self._last_confirmed_size = (w, h)
         return best
+        

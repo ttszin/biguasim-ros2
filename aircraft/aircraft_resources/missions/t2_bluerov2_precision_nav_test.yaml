@@ -1,0 +1,41 @@
+steps:
+  # "takeoff" here means arm + enter GUIDED — reused from the Multicopter/Rover
+  # action type (ardupilot_interface.cpp's mav_type_==12 branch treats it that
+  # way; no new action/message type needed).
+  - action: takeoff
+    params:
+      takeoff_altitude: 0.0
+
+  # 2026-09-18: precision_navigate streams a continuously-recomputed velocity
+  # setpoint straight to /mavros/setpoint_raw/local (ArduSub's own rate/
+  # attitude loops still run underneath -- this is still SITL, not a bypass
+  # of the autopilot), instead of handing ArduSub a fixed position target and
+  # letting its own wp_nav/PosControl stack shape the trajectory. See
+  # mission_node.py's dispatch comment for the full reasoning: this sidesteps
+  # wp_nav's braking-distance/deceleration profile and the waypoint-arrival
+  # transients that repeatedly destabilized pitch this session, and there's
+  # no position-target-goes-stale-without-refresh failure mode to patch
+  # around, since we're the ones actively recomputing velocity every 100ms.
+  #
+  # Same target as t2_bluerov2_hold_test.yaml (north=2, east=0, altitude=0 --
+  # hold depth, matching the point where this whole investigation's fixes
+  # were validated) for a direct comparison between the two navigation
+  # approaches.
+  - action: precision_navigate
+    params:
+      north: 2.0
+      east: 0.0
+      altitude: 0.0
+      kp: 0.3          # velocity = kp * position_error, clamped below
+      max_speed: 0.3    # m/s, clamped on the combined 3D vector
+      tolerance: 0.15   # m, arrival radius
+      timeout: 60.0     # s, fails the mission step if not reached in time
+
+  # Hold in place after arrival — same log_hover_stability.py measurement
+  # window as the other BlueROV2 tests. precision_navigate already sends one
+  # explicit zero-velocity command on arrival (see _precision_nav_stop()), so
+  # this wait is measuring how well GUIDED holds on its own from there, same
+  # as it would after any other navigation method.
+  - action: wait
+    params:
+      duration: 120.0

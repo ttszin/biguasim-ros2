@@ -51,13 +51,12 @@ from biguasim.ardubridge import ArduBiguaSimRunner
 from biguasim.ardubridge.vehicle import VEHICLE_REGISTRY
 
 # Same x=25 water-crossing point already validated by t2_land_test.yaml/
-# t2_hover_test.yaml/biguasim_sim_runner_blueboat.py. z=-1.0 (already
-# submerged 1m below the surface at spawn) rather than the BlueBoat's z=0.2 —
-# the BlueROV2 has no hull/buoyancy to float on the surface with, and this
-# test's whole point is validating position hold while submerged. Starting
-# point only, adjustable if live testing shows a spawn-splash/settle issue
-# like the BlueBoat's did.
-DEFAULT_LOCATION = [25.0, 0.0, -1.0]
+# t2_hover_test.yaml/biguasim_sim_runner_blueboat.py. z=-2.0 (submerged 2m
+# below the surface at spawn, comfortably above the riverbed at this
+# location, confirmed live around z=-9.7) rather than the BlueBoat's
+# z=0.2 — the BlueROV2 has no hull/buoyancy to float on the surface with,
+# and this test's whole point is validating position hold while submerged.
+DEFAULT_LOCATION = [25.0, 0.0, -2.0]
 
 # SERIAL1 (5762), not SERIAL0/5760 (MAVROS's own link) -- ArduPilot's SITL
 # TCP serial emulation only actively services one client per port; sharing
@@ -143,6 +142,23 @@ def main() -> None:
                               f"sysid={gps.target_system} compid={gps.target_component}")
                     except (ConnectionRefusedError, OSError):
                         gps = None
+
+                if gps is not None:
+                    # ArduSub streams a lot on this link (heartbeats, AHRS2,
+                    # ATTITUDE, VFR_HUD, SIMSTATE, TIMESYNC at ~10Hz, etc. --
+                    # confirmed live, ~9 message types at rates up to
+                    # ~10Hz), and this connection only ever sends, never
+                    # reads. Left undrained, the OS-level TCP receive buffer
+                    # for this socket fills up over minutes; once full, the
+                    # kernel applies TCP backpressure to *ArduSub's own*
+                    # writes to this fd, which -- since ArduSub's scheduler
+                    # is single-threaded -- can stall it entirely. Suspected
+                    # contributor to the angular-velocity instability found
+                    # live (~12 minutes to manifest, matching how long a
+                    # 64KB-ish buffer takes to fill at this message rate) --
+                    # drain it every tick so it can never build up.
+                    while gps.recv_match(blocking=False) is not None:
+                        pass
 
                 if gps is not None and json_state is not None and now - last_gps_send >= gps_period:
                     last_gps_send = now

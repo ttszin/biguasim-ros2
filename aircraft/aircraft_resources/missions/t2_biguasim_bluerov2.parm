@@ -113,3 +113,296 @@ PSC_NE_VEL_I 0.15
 # distance -- doesn't by itself explain the ~7m depth overshoot, so the
 # depth axis likely has a separate/additional cause not yet found.)
 WP_SPD 1.0
+
+ATC_RAT_RLL_P 0.1
+ATC_RAT_RLL_I 0.05
+ATC_RAT_RLL_D 0.001
+ATC_ANG_RLL_P 3.0
+
+# 2026-08-29: with the motor-mixing sign bugs actually fixed (uuv.py's
+# ft_x/ft_y/ft_z, not motor_signs -- see biguasim_bridge/README.md), the
+# depth overshoot is no longer confounded by wrong-direction thrust.
+# Confirmed live: with correct signs, depth descended smoothly and
+# correctly toward the -3.0m target (-1.89 -> -2.41m, clean, uncorrupted
+# telemetry from before any collision) -- but still overshot past target
+# and hit the world's riverbed (~-9.7m below spawn) before stopping. This
+# is a real, single-direction (not oscillating) overshoot: the vehicle
+# doesn't decelerate soon enough approaching the target. Cut the vertical
+# position/velocity P gains further (already halved once, still not
+# enough) and added a velocity D-term for damping (was 0 -- PSC_D_VEL_D
+# defaults to 0.0f, AC_PosControl.cpp:360, no derivative damping on this
+# loop at all before this). Also capped the max descent rate explicitly
+# (WP_SPD_DN, compiled default 1.5 m/s, not previously overridden) so
+# there's less momentum to arrest even if the gains still aren't perfect.
+PSC_D_POS_P 0.6
+PSC_D_VEL_P 1.5
+PSC_D_VEL_D 0.3
+WP_SPD_DN 0.5
+
+# 2026-08-29: fixed a second, separate motor-mixing sign bug -- mt_z (yaw
+# moment), not just ft_x/ft_y/ft_z (translation) above. Root-caused by
+# tracing motor_mapping=[5,4,1,0,3,2] through ArduSub's own
+# SUB_FRAME_VECTORED yaw_fac table (AP_Motors6DOF.cpp): the original
+# mt_z = (M[2]-M[3]-M[4]+M[5])*sqrt came out with the OPPOSITE sign of
+# ArduSub's own commanded yaw direction (confirmed both algebraically and
+# with an isolated no-SITL numeric test) -- flipped in uuv.py the same
+# decoupled way as ft_z (biguasim, not this repo).
+#
+# Confirmed live this changed the failure mode: before the fix, heading
+# oscillated wildly both directions and never converged (inverted-sign
+# feedback signature). After the fix, it instead spun up smoothly in ONE
+# direction (angular_vel.z climbing 0->429 deg/s, no oscillation back) until
+# SITL itself crashed -- the classic signature of a correctly-signed but
+# completely undamped rate loop, not a sign error anymore. Checked:
+# ATC_RAT_YAW_D=0.0 (AC_ATC_MULTI_RATE_YAW_D compiled default, confirmed via
+# AC_AttitudeControl_Multi.h -- never overridden, unlike roll which already
+# has ATC_RAT_RLL_D=0.001 above) -- zero derivative damping on yaw rate.
+#
+# Scaled yaw gains by the same ratios already validated live for roll
+# (tuned/default): RAT_P 0.1/0.135=0.74, RAT_I 0.05/0.135=0.37,
+# ANG_P 3.0/6.0=0.5 (ArduSub's Sub-specific AC_ATC_SUB_ANGLE_P=6.0 default,
+# AC_AttitudeControl_Sub.cpp, not Multi's generic 4.5 -- confirmed both
+# roll and yaw share this Sub-specific override). RAT_D has no default to
+# scale from (compiled default is 0.0, unlike roll's 0.0036) -- borrowed
+# roll's own tuned absolute value (0.001) as a first-pass damping term,
+# since it's the only value already validated on this same vehicle/sim.
+# NOT YET CONFIRMED LIVE.
+ATC_RAT_YAW_P 0.13
+ATC_RAT_YAW_I 0.007
+ATC_RAT_YAW_D 0.001
+ATC_ANG_YAW_P 3.0
+
+# 2026-08-29: confirmed live the yaw-gain pass above genuinely slowed the
+# spin-up (angular_vel.z reached only ~56 deg/s at the same point in the
+# approach where it had already passed 100+ deg/s before), but the vehicle
+# still overshot its depth target and hit the riverbed while still
+# spinning, producing a violent multi-axis angular spike (14.97 -18.84
+# 14.86 deg/s across x/y/z, not just yaw) that crashed SITL. Prioritizing
+# the vertical overshoot first so there's no floor impact left to trigger
+# that crash while the yaw damping is tuned further.
+#
+# Cut the position/velocity feedback gains again (same direction as the
+# 2026-08-29 pass above, still not enough) and, new this pass: WP_ACC_Z --
+# the vertical equivalent of WP_ACC, AC_WPNav.cpp's compiled default 1.0
+# m/s² (confirmed via AC_WPNav.h's WP_ACC_Z_DEFAULT), never before
+# overridden here. Together with the already-cut WP_SPD_DN, this shortens
+# both the cruise speed and the braking runway needed to arrest it, mirror
+# of the WP_SPD fix that worked for the horizontal axis. NOT YET CONFIRMED
+# LIVE.
+PSC_D_POS_P 0.3
+PSC_D_VEL_P 0.8
+PSC_D_VEL_D 0.5
+WP_SPD_DN 0.3
+WP_ACC_Z 0.3
+
+# 2026-08-29: the first yaw-gain pass above (RAT_P/I/D, ANG_P) genuinely
+# slowed the spiral (confirmed live) but didn't stop it -- angular_vel.z
+# was still climbing (~56 deg/s and rising) when the vehicle hit the
+# riverbed. That pass only reshaped the RATE-feedback response; it never
+# capped how fast the controller is *allowed* to accelerate the commanded
+# yaw rate in the first place. Found that cap: ATC_ACC_Y_MAX
+# (AC_AttitudeControl.cpp's ACC_Y_MAX, backed by
+# AC_ATC_SUB_ACCEL_Y_MAX_DEGSS=1100 deg/s^2 for Sub specifically --
+# AC_AttitudeControl_Sub.cpp/.h) -- never overridden, and 1100 deg/s^2 is
+# so loose it was never the binding constraint (the observed ~56 deg/s in
+# under a second implies an effective accel far below that ceiling, so the
+# runaway was coming from the feedback loop itself, not being reined in by
+# any hard limit). Capping it well below what was actually observed forces
+# the controller to ramp yaw rate up gradually no matter what the feedback
+# loop is doing -- same "cap the commanded profile directly" strategy
+# already validated for WP_SPD (horizontal) and WP_ACC_Z (vertical) above.
+#
+# Also strengthened the rate-loop pass itself: D raised from 0.001
+# (borrowed from roll, evidently not enough) to 0.003 (close to Copter/Sub's
+# own compiled roll/pitch default of 0.0036, AC_ATC_MULTI_RATE_RP_D --  a
+# physically-plausible damping magnitude for this vehicle class rather than
+# an arbitrary guess), and ANG_YAW_P cut further (3.0 -> 2.0) to slow the
+# outer loop from demanding a fast rate change in the first place. NOT YET
+# CONFIRMED LIVE.
+ATC_RAT_YAW_D 0.003
+ATC_ANG_YAW_P 2.0
+ATC_ACC_Y_MAX 45.0
+
+# 2026-08-29: root-caused the actual DRIVER of the sustained yaw spin, not
+# just its symptom. It isn't the mixer anymore (mt_z's sign bug above is
+# real and fixed) -- it's ArduSub's own default GUIDED auto-yaw behavior.
+# Confirmed via source: WP_YAW_BEHAVIOR_DEFAULT = WP_YAW_BEHAVIOR_CORRECT_XTRACK
+# (ArduSub/config.h), which ModeGuided::get_default_auto_yaw_mode()
+# (mode_guided.cpp) turns into AUTO_YAW_CORRECT_XTRACK -- GUIDED continuously
+# re-points the vehicle to correct cross-track error toward the target.
+# ardupilot_interface.cpp's GlobalPositionTarget always sets
+# IGNORE_YAW|IGNORE_YAW_RATE (never commands yaw explicitly), so this
+# default behavior is what's actually driving yaw here. The horizontal
+# position/velocity gains (PSC_NE_POS_P/PSC_NE_VEL_I above) are still much
+# closer to their defaults than the vertical ones (which got several
+# aggressive cuts this session) -- if horizontal position is
+# overshooting/noisy, the cross-track error vector swings, and
+# CORRECT_XTRACK chases it, producing the observed sustained one-direction
+# spin. The RAT_YAW_D/ANG_YAW_P/ACC_Y_MAX changes above only damp the
+# symptom; this cuts it at the source for this hold-test (heading doesn't
+# matter here). NOT YET CONFIRMED LIVE.
+WP_YAW_BEHAVIOR 0
+
+# 2026-08-30: re-enabling FS_EKF_ACTION (was 0/disabled, see the original
+# reasoning near the top of this file -- kept for history, not wrong, just
+# superseded). It was disabled because BiguaSim's synthetic GPS produced a
+# transient jump/glitch right around AHRS init that tripped the EKF check
+# and silently blocked every GUIDED mode-set request. That specific glitch
+# is now covered by EK3_CHECK_SCALE/EK3_GLITCH_RAD above (glitch-RADIUS
+# tolerance, a different EKF metric from what FS_EKF_ACTION reacts to --
+# ahrs.get_variances()'s compass/velocity variance, ArduSub/failsafe.cpp's
+# failsafe_ekf_check()), so re-enabling shouldn't reintroduce the original
+# arming problem.
+#
+# Motivation: confirmed live this session that the vehicle can rise
+# uncommanded (all the way to the surface) during a suspected Holodeck
+# physics stall -- see runner.py's new env.step() watchdog log for direct
+# evidence next time this happens. Sub's EKF failsafe only has two real
+# options (ArduSub/defines.h): FS_EKF_ACTION_DISABLED=0 or
+# FS_EKF_ACTION_DISARM=2 -- no passive "hold position" action exists for
+# Sub (unlike Copter's LAND/ALTHOLD options), so DISARM is the only
+# available protection. A prolonged loss of fresh EKF corrections should
+# show up as growing compass/velocity variance (EKF covariance grows during
+# prediction-only steps with no measurement updates) and cross
+# FS_EKF_THRESH (left at its compiled default -- not yet tuned) after 2
+# continuous seconds of bad variance -- catching a real stall regardless of
+# its root cause, not just the one bridge-freeze mechanism investigated
+# this session. Disarming cuts thrust rather than continuing to apply a
+# stale, possibly-wrong command -- with buoyancy now much closer to neutral
+# (uuv.py's 1.002 multiplier), a disarmed drift should be far gentler than
+# letting a stale non-corrective command keep running indefinitely.
+# NOT YET CONFIRMED LIVE -- watch for both false positives (disarming
+# during a normal transient) and whether FS_EKF_THRESH's default is even
+# the right sensitivity for this simulated GPS/EKF setup.
+#
+# UPDATE: FS_EKF_ACTION_DISARM=2 reproduced the same SITL boot crash
+# ("Barometer 2 calib[535/740]" then "Connection reset by peer") 3/3 times
+# -- confirmed real, not environmental flakiness. Re-read AP_Arming::disarm()
+# (AP_Arming.cpp) -- it early-returns safely if not armed
+# (`if (!armed) return false;`), which is exactly the state during boot/baro
+# calibration, so the crash isn't the obvious top-level guard; something
+# deeper in that call path (or a race on the armed flag itself this early
+# in boot) is still unexplained. Not worth chasing further right now --
+# ArduSub/defines.h has a third, actually-passive option that sidesteps the
+# whole disarm() call: FS_EKF_ACTION_WARN_ONLY=1 ("Send warning to gcs").
+# failsafe_ekf_check() (failsafe.cpp) runs the identical variance-check/
+# logging/GCS-warning path for both WARN_ONLY and DISARM -- the disarm()
+# call is the ONLY thing DISARM adds, so WARN_ONLY should get the same
+# detection (dataflash ERR entry + GCS "EKF bad" text) without the crash
+# risk. Doesn't cut thrust during a real stall (no passive "hold" action
+# exists for Sub), but gives clean, unambiguous confirmation next time a
+# stall-like EKF-variance event happens. NOT YET CONFIRMED LIVE.
+# UPDATE 2: FS_EKF_ACTION_WARN_ONLY=1 reproduced the identical boot crash
+# too -- same symptom (no new dataflash log, MAVROS "channel closed", ardusub
+# process alive but never stabilizes a connection). Since WARN_ONLY never
+# calls arming.disarm() at all, this rules out the disarm() call as the
+# cause -- it's something in the CODE PATH SHARED by both nonzero actions
+# (ahrs.get_variances(), LOGGER_WRITE_ERROR, or gcs().send_text() inside
+# failsafe_ekf_check()) that doesn't tolerate being exercised this early in
+# boot (before AHRS/logging is fully up) in this ArduSub V4.8.0-dev build.
+# 3/3 reproductions across both nonzero values, 0 reliable otherwise -- this
+# is a real upstream ArduSub bug, not something fixable from this repo's
+# side (would need patching ArduPilot's C++ failsafe_ekf_check() itself).
+# Reverted back to disabled; abandoning FS_EKF_ACTION as the mitigation for
+# the slow-drift-during-a-stall problem -- the runner.py env.step() watchdog
+# (BiguaSim side) remains the only instrumentation for that.
+FS_EKF_ACTION 0
+
+# 2026-08-30: root-caused both the yaw divergence and the slow rise as two
+# SEPARATE mechanisms, from a raw motor/quaternion log of a run that ran
+# long enough (66s) to actually diverge (earlier ~20-30s tests just cut off
+# before it got bad -- the yaw was never actually stable, just slow).
+#
+# YAW: confirmed with real logged motor values (t=19.02s: m2=-71.8, m3=-64.8,
+# m4=68.3, m5=66.9 -- NOT symmetric for a nominally pure-forward command) that
+# mt_z comes out nonzero even with no explicit yaw commanded. Root cause: TT
+# (and M) scale with rotor_speed^2 (uuv.py), but ArduSub's mixer sums
+# corrections LINEARLY assuming thrust is proportional to command. Riding on
+# top of a large forward-thrust common-mode bias, any ordinary small
+# rate-controller correction becomes an asymmetric perturbation that the
+# squaring amplifies disproportionately into real yaw torque -- which
+# demands more correction, which gets amplified more -- a genuine positive-
+# feedback loop, not a simple constant-bias problem (matches the observed
+# shape: slow buildup over ~30s, then a sudden runaway to a full tumble by
+# t=50-56s, all while the watchdog logged zero stalls -- confirmed real
+# physics, not a Holodeck freeze). Attacking the amplitude available to that
+# loop rather than chasing gains further: less forward bias to begin with,
+# and a smoother ramp so corrections stay small.
+WP_SPD 0.5
+WP_ACC 1.0
+ATC_ACC_Y_MAX 15.0
+
+# 2026-08-30 update: confirmed live the cuts above only DELAYED the yaw
+# divergence (~50s -> ~55s), didn't eliminate it -- reverse-solved the real
+# per-motor forward/lateral/yaw decomposition from a logged sample
+# (t=19.02s: m2=-71.8,m3=-64.8,m4=68.3,m5=66.9 -> Forward~68, Lateral~1.4,
+# YAW~2.1) and confirmed a genuine, nonzero yaw command is already present
+# minutes before any visible divergence -- not sensor noise, a real
+# correction that the v^2 coupling (see above) amplifies over time. Cutting
+# much harder this pass instead of incrementally: less cruise speed left to
+# feed the loop, a much tighter yaw-accel ceiling, and more rate damping
+# (ATC_RAT_YAW_D pushed past roll/pitch's own compiled default now that
+# live evidence shows this axis is measurably more sensitive to the
+# coupling than roll turned out to be).
+WP_SPD 0.2
+ATC_ACC_Y_MAX 5.0
+ATC_RAT_YAW_D 0.01
+
+# RISE: PSC_D_VEL_I (vertical velocity loop integral gain) has been 0.0
+# (compiled default, AC_PosControl.cpp:360) this entire investigation --
+# only P and D were ever tuned. A pure P(D) controller mathematically CANNOT
+# fully null a constant force disturbance (whatever residual buoyancy excess
+# remains, even the small ~0.2N left after uuv.py's 1.002 multiplier) --
+# it always settles at a nonzero steady-state position error proportional to
+# the disturbance. That's the actual, general-purpose fix for "still rises,
+# just slower/further out now matter how small the excess is" -- an
+# integral term is the standard control-theory answer for exactly this,
+# rather than continuing to chase smaller and smaller buoyancy margins.
+PSC_D_VEL_I 0.15
+
+# 2026-08-30: same fix pattern as PSC_D_VEL_I above, applied to the last
+# residual -- yaw is now down to a slow, roughly-constant ~0.04 deg/s creep
+# (confirmed live: 358.7->358.0 over 17s, no acceleration, not the old
+# positive-feedback runaway -- that mechanism is gone, this is just a small
+# steady disturbance getting through). ATC_RAT_YAW_I was set to 0.007 early
+# in this session's yaw work, before the root cause was understood -- never
+# revisited since. A small, steady residual is exactly what a rate-loop
+# integral term is for; bumping it meaningfully (not another marginal
+# nudge) to actually null it out over time instead of just damping/capping
+# around it. NOT YET CONFIRMED LIVE.
+ATC_RAT_YAW_I 0.04
+
+# 2026-08-30: yaw itself held rock-steady this pass (358-360 deg for 20+
+# real-time seconds, confirmed live) -- the ATC_RAT_YAW_I bump worked. But
+# the same run still tumbled, just PITCH led it this time instead of yaw
+# (Pitch: 0.15 -> -0.25 -> 0.68 -> 1.33 -> -9.62 -> -18.05 deg,
+# Roll dragged along right behind it -- confirmed live via dataflash ATT).
+# Checked: ATC_RAT_PIT_P/D are still completely untouched (0.135/0.0036,
+# Multi's raw compiled default) -- the same starting state roll was in
+# before its own (successful, if more modest) tuning pass early this
+# session. Applying the same recipe that worked best overall (yaw's more
+# thorough pass, not roll's lighter one) to pitch now: cut P, add real D
+# damping (was 0 in practice -- 0.0036 is negligible), cut the outer
+# angle-P so it doesn't demand fast rate changes in the first place.
+# NOT YET CONFIRMED LIVE.
+ATC_RAT_PIT_P 0.1
+ATC_RAT_PIT_D 0.01
+ATC_ANG_PIT_P 3.0
+
+# 2026-08-30 (run 2 of the 3-clean-runs bar): the pitch gain pass above
+# reduced severity/frequency (one clean 180s run) but did not eliminate the
+# instability -- confirmed live in a second run: Pitch grew 4.50 -> 8.00 ->
+# 11.15 -> 12.26 -> -36.15 -> -55.48 deg while STILL in GUIDED (MODE log:
+# POSHOLD only engaged afterward, at the tail end of an already-severe
+# tumble -- POSHOLD inherited it, didn't cause it, same as every other
+# occurrence). Found the roll/pitch equivalent of ATC_ACC_Y_MAX (which
+# helped yaw): ATC_ACC_R_MAX/ATC_ACC_P_MAX, both defaulting to 1100 deg/s^2
+# (AC_ATTITUDE_CONTROL_ACCEL_RP_MAX_DEFAULT_DEGSS, AC_AttitudeControl.h) --
+# never touched, same loose-non-binding-ceiling situation yaw's own default
+# was in before capping it helped. Applying the same hard ceiling to both
+# axes now instead of pushing D/P further -- this run's escalation
+# (4->8->11->12 deg over ~4s, then a much faster final blowup) looks exactly
+# like the shape a runaway takes before a rate cap intervenes, not
+# something P/D alone reliably out-damps once triggered.
+ATC_ACC_R_MAX 20.0
+ATC_ACC_P_MAX 20.0

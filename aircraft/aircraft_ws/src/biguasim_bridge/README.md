@@ -706,23 +706,25 @@ its own investigation.
 
 ## Position-hold for BlueROV2 (ArduSub) — mission runs end-to-end; one stability bug open
 
-**Status (2026-08-16, end of day): a real, structural physics bug in
-BiguaSim's own buoyancy model was found and fixed — the vehicle no longer
-porpoises in and out of the water forever (see "2026-08-16: buoyancy bug"
-near the end). Four separate PID-gain interventions (position P, velocity
-P, two different integral terms, one feedforward speed cap) each failed to
-fix the remaining position/depth overshoot, which was itself the clue:
-found and fixed a likely root cause tonight — BlueROV2's `motor_signs` in
-`~/biguasim` had every motor's sign backward, confirmed via an isolated
-(no-SITL) simulation showing "forward" commands producing backward thrust
-and "ascend" producing downward thrust. **Not yet confirmed live** — the
-one live test after applying it showed tumbling, and it's not yet known
-whether that's the sign fix being wrong/incomplete or bug #9's
-already-documented rotation instability confounding the result. See
-"2026-08-16 evening" near the end for the full trail and the next
-disambiguating test to run. Don't read this section as "done" — read both
-2026-08-16 sections and "Position-hold quality" near the end for the current
-honest state.**
+**Status (2026-08-29): the buoyancy fix (2026-08-16) still holds — no more
+infinite surface-breach cycle. The motor-sign theory (2026-08-16 evening)
+was tested cleanly with new isolated-velocity-command infrastructure and
+disproven: three `motor_signs` configurations tried, none fix the
+rotational instability, one (all-six-flipped) made it clearly worse. The
+horizontal motor signs are confirmed correct for rotation (reverted to the
+original `[1]*6`, stable). The overshoot/capsize behavior seen throughout
+this whole investigation is very likely bug #9 (rotation instability,
+documented under "Position-hold quality" below) triggering within
+seconds of any thrust command rather than only minutes after a mission
+ends as first observed — a control-loop problem (likely ArduSub's roll
+rate/angle controller gains), not a motor-mixing problem. Also fixed,
+unrelated: a multi-minute EKF3 bootstrap delay, sped up to ~3 minutes by
+relaxing a hardcoded gyro-bias-convergence threshold in `~/ardupilot`
+directly (outside both tracked repos, won't survive a fresh ArduPilot
+checkout). See "2026-08-29" near the end for the full trail and the
+recommended next lead (`ATC_RAT_RLL_*`/`ATC_ANG_RLL_P`). Don't read this
+section as "done" — read the 2026-08-16 and 2026-08-29 sections and
+"Position-hold quality" near the end for the current honest state.**
 
 1. **Buffer-size mismatch (fixed, confirmed live).** The deterministic
    SIGSEGV that blocked every `cmd_motor_speeds` spawn attempt was a
@@ -1577,7 +1579,325 @@ found running at once at one point) -- always verify a clean `ps aux`
 sweep before starting a new attempt, not just after the intended cleanup
 command's exit code.
 
-### The recurring BiguaSim startup stall: contributing factor found, not fixed
+**2026-08-28: a real, external contributing factor to the spawn hang
+confirmed live -- GPU memory contention from an unrelated concurrent
+workload.** A separate, unrelated training job (`Holodeck Pier-Harbor`,
+package `Hydrone`, not this repo's `SkyDive`/`Bridge` world) was running
+on the same GPU at the same time, using ~2.2GB VRAM combined across two
+processes. With that running, `nvidia-smi` showed as little as 430MB free
+during a BlueROV2 spawn attempt (normally 3-5GB+ free with nothing else
+running) -- and that attempt then burned real, sustained CPU (~55 ticks
+per 15s tick, confirmed over 24 consecutive checks spanning 6+ minutes)
+without the log ever advancing past its usual "Mallocing 32 bytes for key
+bluerov0-id0" spawn point. Busy-but-stuck like this, rather than idle-and-
+stuck (0% CPU, matching the earlier-documented semaphore-deadlock
+signature), is consistent with a tight retry loop failing to allocate GPU
+memory rather than that separate deadlock -- i.e. this looks like a third,
+distinct failure signature for "the spawn hang," on top of the semaphore
+deadlock and the original Vulkan-transient-allocator crash already
+documented above, and this one has an identified, external, non-code
+cause. Tried `--viewport`-less (headless) to reduce footprint; inconclusive
+before the session was paused to let the training job finish. Whoever
+picks this back up: check `nvidia-smi` free VRAM before troubleshooting a
+spawn hang as a code problem -- if something else on the same GPU is
+using several GB, that alone may be sufficient explanation, and the fix is
+to not run both at once, not to change this repo's code.
+
+### 2026-08-29: EKF3 bootstrap sped up; the motor-sign theory tested cleanly and disproven -- the rotation instability is a control-loop problem, not a mixing problem
+
+**A real, separate win: the multi-minute wait for `EKF3 ... is using GPS` /
+`Guided requires position` was sped up.** Traced the actual ArduSub-side
+gate: `Sub::ekf_position_ok()` (`ArduSub/system.cpp`) requires
+`AP_AHRS::Status::HORIZ_POS_ABS` once armed (a much stricter bar than the
+disarmed case's `PRED_HORIZ_POS_ABS`) -- but this repo's own
+`takeoff_handle_accepted` already requests GUIDED *before* arming
+(confirmed reading `ardupilot_interface.cpp`'s own comment: "If ArduSub
+rejects this ... unlike arming which doesn't require it"), so the
+disarmed/weaker check was already the one gating things, and it was still
+slow. Traced further into `AP_NavEKF3_Control.cpp`: `PV_AidingMode` can't
+reach `AID_ABSOLUTE` (required for `horiz_pos_abs`) until `filterHealthy`
+is true, which requires `delAngBiasLearned` -- gyro delta-angle bias
+variance converging below a hardcoded threshold,
+`delAngBiasVarMax = sq(radians(0.15 * dtEkfAvg))` in
+`AP_NavEKF3_Control.cpp`, not an exposed parameter. Relaxed it to `1.0`
+(experimental, `~/ardupilot`, `libraries/AP_NavEKF3/AP_NavEKF3_Control.cpp`
+-- outside both git repos this project tracks, so it doesn't survive a
+`git pull`/fresh clone of ArduPilot; whoever needs this again will have to
+reapply it, the diff is small and documented inline where the constant is
+defined). **Confirmed live, twice: boot-to-armed-and-moving dropped from
+several minutes to about 3 minutes**, a real improvement, independent of
+the GPU-contention issue above.
+
+**Root cause hunt for the position/depth overshoot pivoted to motor signs
+today, tested cleanly with new infrastructure, and the theory did not
+survive contact with a clean test.** Built two things to make this
+possible: `t2_bluerov2_velocity_signtest.yaml` (a minimal 2-step mission —
+`takeoff` then a long `wait`, no `go_to_known_gps_waypoint` — so the
+vehicle arms and holds without `wp_nav`/`WP_SPD` ever engaging), and a
+manual velocity-only command published straight at
+`/mavros/setpoint_raw/local` (`mavros_msgs/PositionTarget`, velocity
+fields only, everything else `IGNORE_*`) once armed+GUIDED, bypassing the
+entire position-control stack this session spent all day tuning
+unsuccessfully. This isolates "do the motors respond in the right
+direction" from "does position-hold converge" far more cleanly than any
+full-mission test could.
+
+Three motor_signs configurations tested with the *identical* command
+(0.3 m/s north, 2s, `vehicle.py`'s `BlueROV2` profile in `~/biguasim`):
+
+1. **All six flipped to `-1`** (yesterday's theory, from an isolated
+   dynamics-only simulation showing ArduSub's own `SUB_FRAME_VECTORED`
+   factor table, mapped through `motor_mapping`, producing backward thrust
+   for "forward" and downward thrust for "ascend" with the original
+   `[1]*6`). Live result: **severe, growing roll instability** --
+   `angular_vel.x` 376 -> 792 deg/s in about 3 seconds, still climbing,
+   despite the command having zero roll/yaw/vertical component. A
+   translation-only input should never induce a growing roll rate from a
+   correctly balanced thruster mix.
+2. **All six reverted to the original `[1]*6`.** Live result with the
+   *identical* command: **no tumbling** -- confirmed live, described live
+   as "foi até o fundo em linha reta e não tombou mais" (still drifted
+   toward the bottom with a slight rightward lean, consistent with the
+   already-documented vertical-axis sign issue from the isolated
+   simulation -- but no rotational runaway).
+3. **Only the two vertical motors (sim actuators 0-1) flipped to `-1`,
+   horizontal four left original** -- a "surgical" attempt to fix the
+   vertical/depth-direction issue from finding 1 without reintroducing the
+   instability from finding 1. Live result: **the instability came back,
+   worse** -- `angular_vel.x` reached 1099 deg/s. Flipping both vertical
+   signs together also flips the sign of their differential roll moment
+   (`mt_x = -(M[0]-M[1])` in `HexaCopterFiveDoF._compute_body_wrench()`,
+   both `M[0]`/`M[1]` odd functions of their own signed speed) -- so this
+   only reversed *which direction* an already-unstable roll response
+   spins, it didn't touch whatever makes it unstable in the first place.
+
+**Conclusion: the day-long overshoot/capsize saga was never really a
+motor-sign problem.** Reverted `motor_signs` to the fully-original
+`[1, 1, 1, 1, 1, 1]` (confirmed live stable for rotation, tested twice).
+The roll-axis runaway that showed up in every full-mission test today and
+yesterday is very likely bug #9 (the rotation instability documented
+under "Position-hold quality" above) triggering far faster than
+originally observed -- within *seconds* of any thrust command here,
+versus originally seen only minutes after a mission ended. That timing
+difference is itself a clue: whatever the trigger threshold is, it seems
+sensitive to how much cumulative thrust/disturbance the vehicle has
+experienced, not to a fixed wall-clock delay. The vertical-axis
+translational sign issue (ascend command -> downward thrust) documented
+under "2026-08-16 evening" above is still real and still unfixed --
+deliberately left alone here since fixing it clearly isn't sufficient and
+isn't the rotational root cause, so guessing at it again isn't a good use
+of the next session's time.
+
+**Best next step for whoever picks this up:** stop testing `motor_signs`
+combinations -- three tried, all either neutral or actively harmful for
+rotation, and the evidence now points at ArduSub's attitude controller
+itself, not motor mixing. Check `ATC_RAT_RLL_P`/`ATC_RAT_RLL_I`/
+`ATC_RAT_RLL_D` (rate controller) and `ATC_ANG_RLL_P` (angle controller)
+specifically, since roll is the dominant/first axis to run away in every
+occurrence recorded so far (this session's and the ones documented
+above). The velocity-only test infrastructure built today
+(`t2_bluerov2_velocity_signtest.yaml` + a raw
+`/mavros/setpoint_raw/local` publish) is reusable for testing attitude
+gain changes the same clean way, without `wp_nav`/position-control noise
+in the way.
+
+### 2026-08-30: the rotation/rise instability root-caused for real -- a mixer sign bug, a left-handed IMU bug, a GUIDED setpoint-staleness bug, and finally the missing pitch-rate damping. Clean 180s hover achieved.
+
+**Where the 2026-08-29 section above left off** ("the evidence now points at
+ArduSub's attitude controller itself, not motor mixing") turned out to be
+half right: the *disabling* hypothesis (motor_signs) really was a dead end,
+but that didn't mean the mixer had no real bug in it -- just not the one
+already tested. Four separate, real bugs stacked on top of each other; each
+one's fix exposed the next.
+
+**Bug: `mt_z` (yaw moment) had an inverted sign, independent of the
+already-fixed `ft_z`.** Traced `vehicle.py`'s `motor_mapping=[5,4,1,0,3,2]`
+through ArduSub's own `SUB_FRAME_VECTORED` factor table
+(`AP_Motors6DOF.cpp`): the sim's horizontal actuators 2-5 map to
+MOT2/MOT1/MOT4/MOT3, whose `yaw_fac` are -1/+1/+1/-1. Substituting into the
+original `mt_z = (M[2]-M[3]-M[4]+M[5])*sqrt` and simulating a positive
+ArduSub yaw command (MOT1/MOT4 up, MOT2/MOT3 down) produces a *negative*
+`mt_z` -- confirmed algebraically and with an isolated no-SITL numeric test.
+Cross-checked the same derivation against `mt_x` (roll), which came out
+correctly signed for the identical substitution -- consistent with the
+already-confirmed-live result that reversing `mt_x` made roll worse, giving
+confidence in the method before trusting it on `mt_z`. Fixed the same
+decoupled way as `ft_z`/`ft_x`/`ft_y`: negate only the final `mt_z`
+expression in `HexaCopterFiveDoF._compute_body_wrench()`
+(`~/biguasim/src/biguasim/dynamics/uuv.py`), after `M` is already computed
+with original per-motor signs. **Confirmed live: heading held within ~2° of
+target through an entire horizontal approach that previously ran away within
+seconds** -- the single biggest jump in this investigation.
+
+**Bug: the gyro's GLU→FRD frame conversion was correct on paper but wrong on
+the yaw axis specifically -- traced to Unreal Engine's left-handed
+convention upstream of it.** With `mt_z` fixed, yaw no longer ran away
+instantly, but a live dataflash `RATE` log still showed a real inverted
+response on that one axis: `YOut` (commanded yaw output) growing steadily
+positive while the raw gyro (`Y`) diverged the *opposite* direction --
+confirmed not a mixer bug this time (re-derived `imu_glu_to_frd`'s existing
+`[p, -q, -r]` conversion by hand, rotation-matrix math checks out). `IMUSensor`
+(`sensors.py`) is a Holodeck/Unreal-*native* sensor, not something this
+repo's Python computes -- Unreal's well-known left-handed coordinate system
+was the next suspect. Live A/B test settled it: flipping all three gyro axes
+at once made roll capsize (`p`'s original sign was already correct -- proof
+the bug is axis-specific, not a wholesale handedness flip), while only `r`
+needed the extra flip. `frame.py`'s `imu_glu_to_frd` now returns
+`[p, -q, r]` (`p`/`q` unchanged from the original geometric conversion, `r`
+alone gets the extra Unreal-side correction) -- **confirmed live**.
+
+**Bug: `dumping_hack` was a one-way latch silently halving buoyancy for the
+entire session.** `self.dumping_hack` starts at `1.0` and permanently drops
+to `0.5` the instant both vertical rotors are ever simultaneously nonzero --
+confirmed via dataflash `RCOU` that this had already latched within the
+first logged sample of every real test (PWM exceeds the `_bipolar_pwm`
+floor almost immediately post-arm), meaning the vehicle had been running on
+half its intended buoyant support this entire investigation, silently
+eating into recovery margin during any real disturbance. Removed the latch
+entirely (`uuv.py`, `_compute_body_wrench()`) -- buoyancy now applies at
+full, undamped strength. With the latch gone, the volume multiplier that
+sizes buoyancy (`_build_params()`) needed re-tuning: `1.02` (originally
+calibrated *with* the latch silently halving it) turned out to leave a real
+~2N excess once undamped, still enough to drift to the surface (confirmed:
+under 7s to cross a 2m gap at that excess's ~0.1 m/s² net accel). Went
+straight to the exact math instead of chasing smaller margins:
+`B = mass * gravity * k` (ρ cancels out of `volume = mass/ρ * k`), so `k=1.0`
+gives `B = W` exactly -- zero excess, zero deficit, by construction.
+Deliberately trades away the "real ROVs run slightly positive for safety"
+margin the original `1.02` was going for, in exchange for eliminating a
+guaranteed slow climb any time the control loop isn't perfectly continuous.
+
+**Bug: ArduSub's mixer assumes thrust is linear in the motor command; this
+sim's is quadratic (`TT ∝ v²`) -- and a real logged sample proved the
+mismatch actually matters.** Reverse-solved the mixer's own linear
+equations from a real logged forward-motion sample (`m2=-71.8, m3=-64.8,
+m4=68.3, m5=66.9`) and got Forward≈68, Lateral≈1.4, **Yaw≈2.1** -- a small
+but genuinely nonzero commanded yaw component present from the very start of
+a nominally pure-forward command. Riding on top of a large forward-thrust
+common-mode bias, ArduSub's rate controller's ordinary small corrections get
+squared along with everything else, amplifying them disproportionately into
+real torque asymmetry -- which demands more correction, which gets amplified
+more: a slow-building positive-feedback loop that no amount of gain/speed
+tuning removed, only delayed. Fixed at the source instead of chasing more
+gain changes: pre-linearize the command before it hits the quadratic law,
+`rotor_speeds_lin = sign(v) * sqrt(V_MAX * |v|)` (`V_MAX=278.9`, matching
+`vehicle.py`'s `_sub_bipolar` bound) -- makes `v_lin² = V_MAX*|v|`, so thrust
+ends up proportional to `v` again (matching what the mixer assumes) while
+full-stick (`v=±V_MAX`) still produces exactly the original max thrust
+(`v_lin=v` at that one point, so vehicle authority/calibration is
+unchanged). Verified numerically before trusting it live: the old/new
+thrust ratio at max stick matches exactly, and `TT_new/v` is now the same
+constant (`278.9`) for every input, confirming genuine linearity.
+
+**Bug (infrastructure, not physics): the mission's `wait` step never
+refreshed GUIDED's setpoint, and the vehicle only had a bounded amount of
+time before the position controller let go of it.** `go_to_known_gps_waypoint`
+sends its `SetReposition` request exactly once, then `mission_step` advances
+to `wait`, which only polls elapsed time -- nothing re-sends the target for
+however long the hold window is configured. This matches, mid-mission, the
+exact failure mode already documented (see `mission_node.py`'s own comment)
+for *after* a mission ends: "a GUIDED-mode vehicle left with nothing
+actively commanding it... doesn't hold its position... once nothing keeps
+refreshing the setpoint." Fixed in `mission_node.py`: the last reposition
+request is now stored (`self._last_reposition_req`) and re-sent
+(`_call_service_no_advance`, so it doesn't touch `mission_step`) every 5s
+while `wait` is active, Sub-only, mirroring the existing POSHOLD-at-
+mission-end fix's scope. The interval is deliberately not tighter: resending
+every 1s (the first version, matching `conops_callback`'s own tick rate) was
+confirmed live to inject real target jitter -- dataflash `PSCD.DPD` (ArduSub's
+own interpreted absolute depth target) swinging as far as +1.1m between
+resends despite the *relative* altitude sent being the exact same constant
+every time. ArduSub re-derives `FRAME_GLOBAL_REL_ALT`'s absolute target from
+its own live EKF home-altitude estimate on every new message, so each resend
+injects a fresh slice of that estimate's small ongoing noise -- 5s still
+refreshes far more often than the setpoint-staleness window ever needed,
+at a fifth of the injected noise.
+
+**Investigated, then deliberately ruled out: `POSHOLD` as the hold
+mechanism.** `mission_node.py` already requests `POSHOLD` when the mission
+completes (a pre-existing fix for the same "GUIDED lets go" problem, applied
+at mission end rather than mid-wait). Watching it live showed the same kind
+of uncommanded drift the `wait`-refresh fix above was built to solve, so
+read `ArduSub/mode_poshold.cpp` directly instead of guessing again: its
+horizontal control (`control_horizontal()`) commands *velocity*, not a
+fixed point, sourced from `channel_forward`/`channel_lateral` RC input --
+with no RC connected (this project's whole SITL setup is headless), the
+target is always zero velocity from wherever the vehicle happens to be at
+that instant, never recovering whatever had already drifted before POSHOLD
+engaged. Worse, if `position_ok()` ever flickers false (a real, already-
+documented occurrence with this sim's synthetic GPS), `control_horizontal()`
+falls through to a fully open-loop branch -- raw RC straight to the motors,
+zero position feedback at all. POSHOLD is designed for a human pilot holding
+the stick near center, not a headless autonomous mission; operator-decided
+to leave the existing mission-end POSHOLD switch alone (not worth touching
+for now) and rely on the `wait`-refresh fix above as this project's actual
+hover mechanism during a mission.
+
+**Bug: pitch-rate damping was never tuned -- with yaw's own instability
+fixed, pitch (never touched all session) became the new weak axis.** A full
+180s run with every fix above in place still tumbled -- but yaw itself now
+held rock-steady (358-360° for 20+ real seconds, confirmed live) while
+*pitch* ran away instead (0.15° → -0.25° → 1.33° → -9.62° → -18.05°, roll
+dragged along right behind it). Checked `ATC_RAT_PIT_P`/`ATC_RAT_PIT_D` live:
+still `0.135`/`0.0036`, Multi's raw compiled default, completely untouched
+all session -- the same starting state roll was in before its own (lighter)
+tuning pass. Applied the same recipe that worked best overall (yaw's more
+thorough pass, not roll's lighter one): `ATC_RAT_PIT_P 0.1`,
+`ATC_RAT_PIT_D 0.01`, `ATC_ANG_PIT_P 3.0`.
+
+**Result, confirmed live with `log_hover_stability.py` (extended this
+session to report drift, not just stddev -- see below) over a full 180s
+`go_to_known_gps_waypoint` + `wait` run:**
+
+```
+peak |roll|:  0.80 deg        (was up to 14.6 deg mid-tumble pre-fix)
+peak |pitch|: 3.46 deg        (was up to 18.0 deg mid-tumble pre-fix)
+horizontal drift: 1.201 m end, 1.542 m worst
+vertical   drift: -0.004 m end, -0.374 m worst  (was: uncontrolled climb to the surface)
+yaw        drift: +0.22 deg end, 2.23 deg worst  (was: unbounded spin)
+```
+
+No tumble, no surface breach, no runaway spin -- the first clean, complete
+180s BlueROV2 hold of this entire investigation. Horizontal stddev (0.385m)
+is the one number left visibly looser than the other axes -- lower priority
+than the instabilities just fixed, since it's bounded rather than
+diverging, but a reasonable next target for whoever picks this up.
+
+**A second run, confirmed live, holds up the same way.** Not a from-scratch
+repeat of the full 180s (mode switched to `POSHOLD` earlier than the
+mission's configured `wait` duration should allow -- a real, separate,
+not-yet-root-caused timing discrepancy between the configured duration and
+the wait actually observed; flagged for whoever picks this up next, not
+solved here), but the vehicle was demonstrably *stable* through both
+segments actually captured: yaw held inside a 1.6° band (358.2°-359.8°) for
+the entire dataflash `ATT` record, position stayed pinned at the target, and
+velocity was confirmed genuinely near-zero (not a frozen-telemetry
+artifact -- cross-checked against `NED vel`) for over 60 real seconds in
+`POSHOLD` before the vehicle was disarmed. Two for two on the current
+`ATC_RAT_PIT_*`/`ATC_ACC_P_MAX`/`ATC_ACC_R_MAX` configuration -- one full
+180s hold and one shorter-but-stable run, no tumbles in either.
+
+**`log_hover_stability.py` extended to report drift, not just stddev.**
+This session's actual failure mode was slow, sustained creep (position/
+depth/heading walking away over tens of seconds), not high-frequency noise
+-- stddev over a run that drifts monotonically doesn't distinguish "jittery
+but centered" from "smooth one-way walk". Added start→end and start→worst-
+point deltas for horizontal position, vertical position (signed, + = up),
+and yaw (wrap-aware around the 359°→0° boundary this vehicle sits right on
+top of) alongside the pre-existing stddev/peak-angle metrics.
+
+**One environment-level finding, unrelated to any of the above and not
+fixed:** ArduSub's own boot-time EKF failsafe check
+(`FS_EKF_ACTION`, `ArduSub/failsafe.cpp`'s `failsafe_ekf_check()`)
+reproducibly crashes SITL boot in this environment -- confirmed 3/3 across
+both non-zero values (`DISARM` and `WARN_ONLY`), ruling out
+`arming.disarm()` itself as the cause (it early-returns safely pre-arm, and
+`WARN_ONLY` never calls it at all, yet crashed identically). The actual
+crash site is somewhere in the code path the two share
+(`ahrs.get_variances()`, `LOGGER_WRITE_ERROR`, or `gcs().send_text()`) executed
+this early in boot, in this ArduSub `V4.8.0-dev` build -- left at `0`
+(disabled) in `t2_biguasim_bluerov2.parm`; a real upstream bug, not
+something fixable from this repo's side.
 
 Bugs #1-#7 above are all confirmed fixed. The one thing in this whole
 section still not root-caused is the *variance* in how long BiguaSim/Unreal
@@ -1824,3 +2144,36 @@ here because they blocked getting a real BiguaSim/ArduPilot run to complete.
   (horizontal position stddev 0.001 m, vertical 0.015 m, peak roll/pitch
   under 0.2°) — first confirmation that the ArduCopter-only ROS2 bridge
   (`ardupilot_interface.cpp`) also works for a Rover vehicle.
+- Full `t2_bluerov2_hold_test.yaml` run against real BiguaSim + ArduPilot Sub
+  SITL (see "2026-08-30: the rotation/rise instability root-caused for real"
+  above): the BlueROV2 armed, dove/moved to its waypoint submerged, and held
+  a full 180s position hold with no tumble and no surface breach (peak
+  roll 0.80°, peak pitch 3.46°, vertical drift -0.004 m end/-0.374 m worst,
+  yaw drift +0.22° end/2.23° worst) — after root-causing and fixing four
+  separate real bugs (an inverted yaw-mixer sign, a left-handed-IMU gyro
+  bug, a one-way buoyancy-halving latch, and a quadratic-vs-linear
+  thrust/mixer mismatch) plus a GUIDED setpoint-staleness bug in the mission
+  runner and a missing pitch-rate damping pass. Horizontal position stddev
+  (0.385 m) is the one axis still looser than the others — a reasonable
+  next target, not a blocker. **Confirmed a second time** on the same
+  configuration: yaw held inside a 1.6° band for the whole run, position
+  stayed pinned at the target, and velocity was confirmed genuinely
+  near-zero for 60+ real seconds before disarm — no tumble either time.
+
+## 2026-09-24 addendum: what the T8.2 underwater tests changed about the sections above
+
+Found while flying planned routes with the BlueROV2 (`aircraft_resources/planning/stage_d/NOTES.md` has the measurements). These
+qualify several "confirmed live" statements above, which were made with the SITL defaults (home altitude 584 m, stock `position` field):
+
+* With SITL's default home altitude (CMAC, 584 m) the ArduSub water barometer reports a **negative** absolute pressure and the EKF
+  ignores it, so the depth estimate is frozen. The hold tests above ran at constant depth, where that is invisible; a dive is not.
+  Start SITL with `-l lat,lon,0,heading` (`planning/stage_d/rov_sitl.sh`) and send the JSON `position` as NED metres with down = -z
+  relative to the water surface.
+* The `mt_z` negation and the un-negated gyro yaw rate described above are **not consistent with each other** in a GUIDED position
+  hold: the gyro yaw rate had the opposite sign to the attitude quaternion's, and the vehicle spun within about 60 s of arming.
+  The original `mt_z` with the ordinary GLU->FRD gyro (`flip_gyro_yaw=False`) held heading within about 2 deg through a dive and 220 s of
+  navigation. The runner of the planner tests selects it with a temporary `BIGUA_MTZ_ORIG` toggle in `uuv.py` (not part of this repo).
+* `ATC_RAT_RLL_I 0.05` (above) lets the roll oscillation grow exponentially (peak doubles about every 10 s, capsizes near 200 s). `0.01` was
+  stable for 220 s. The planner tests set it at runtime; this file still says 0.05.
+* Re-sending a GUIDED position target every 0.25 s makes ArduSub restart its trajectory each time (the ROV crept at 0.03 m/s); send one
+  target per waypoint.
