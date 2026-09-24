@@ -220,3 +220,7 @@ Modelo da placa e memória livre com YOLO · matriz de ocupação vs. esparsa ·
 * `make_comparison_plots.py`: `results/comparison/stage_a_metrics.png` (campanha da Etapa A, 30 seeds) e `sitl_metrics.png` (voos em SITL), mais os CSVs
   com os números. O "tempo até o primeiro caminho" do RRT\* é o de `t_first_solution_ms`; o `t_initial_ms` dele é o orçamento fixo (5 s por trecho), pois ele
   continua refinando.
+* `rehud.py`: redesenha só o cabeçalho de um vídeo já gravado (rótulo, tempo, altura/profundidade, velocidade) a partir do `truth.csv` do voo; usado quando um
+  rótulo ficou grande demais. Câmeras em `recorder.CAMERAS` (`--cam-preset`): `air` e `water` seguem o veículo; `air_high` é oblíqua e alta, para
+  cenários com paredes/blocos altos (a câmera de perseguição entra dentro do bloco quando a rota contorna). Cenários gravados: postes (b1/d1), parede com
+  abertura (b2/d2) e blocos em S (b4/d3, o d3 é só do ROV).

@@ -36,7 +36,7 @@ sys.path.insert(0, str(PLANNING))
 sys.path.insert(0, str(PLANNING / "stage_b"))
 from common_b import to_bsim  # noqa: E402
 
-from recorder import Recorder  # noqa: E402
+from recorder import CAMERAS, Recorder  # noqa: E402
 from scenario import load_scenario  # noqa: E402
 
 from biguasim.ardubridge import ArduBiguaSimRunner  # noqa: E402
@@ -81,6 +81,7 @@ def main() -> None:
                     help="override VehicleProfile.flip_gyro_yaw (yaw-rate sign of the gyro sent to ArduSub); default: the profile's")
     ap.add_argument("--record", help="write an mp4 of the flight (chase camera, see recorder.py)")
     ap.add_argument("--label", default="", help="title burnt into the video")
+    ap.add_argument("--cam-preset", help="camera preset of recorder.CAMERAS (default: the vehicle kind's)")
     ap.add_argument("--marker-dir", help="directory where the executive touches 'started' / 'finished' (video clock and trimming)")
     ap.add_argument("--trail-bgr", default="255,130,70", help="colour of the flown trail, B,G,R")
     ap.add_argument("--legacy-yaw", action="store_true", help="library yaw convention (mt_z negated, gyro r un-negated)")
@@ -97,7 +98,7 @@ def main() -> None:
                                                  location=SPAWN, rotation=[0.0, 0.0, 0.0], ticks_per_sec=a.ticks)
     rec = None
     if a.record:
-        rec = Recorder(a.record, a.label, a.ticks, "water", tuple(int(v) for v in a.trail_bgr.split(",")), marker_dir=a.marker_dir)
+        rec = Recorder(a.record, a.label, a.ticks, "water", tuple(int(v) for v in a.trail_bgr.split(",")), marker_dir=a.marker_dir, cam=CAMERAS[a.cam_preset] if a.cam_preset else None)
         rec.add_sensor(scenario)
     with ArduBiguaSimRunner(profile, scenario, show_viewport=a.viewport, verbose=False) as runner:
         bridge, env, agent, dt = runner._bridge, runner._env, runner._agent_name, runner._dt

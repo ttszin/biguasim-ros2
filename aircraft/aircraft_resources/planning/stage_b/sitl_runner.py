@@ -31,7 +31,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common_b import HOME_BSIM, from_bsim, to_bsim  # noqa: E402
 
-from recorder import Recorder  # noqa: E402
+from recorder import CAMERAS, Recorder  # noqa: E402
 from scenario import load_scenario  # noqa: E402
 
 from biguasim.ardubridge import ArduBiguaSimRunner  # noqa: E402
@@ -127,6 +127,7 @@ def main() -> None:
     ap.add_argument("--viewport", action="store_true")
     ap.add_argument("--record", help="write an mp4 of the flight (chase camera, see recorder.py)")
     ap.add_argument("--label", default="", help="title burnt into the video")
+    ap.add_argument("--cam-preset", help="camera preset of recorder.CAMERAS (default: the vehicle kind's)")
     ap.add_argument("--marker-dir", help="directory where the executive touches 'started' / 'finished' (video clock and trimming)")
     ap.add_argument("--trail-bgr", default="255,130,70", help="colour of the flown trail, B,G,R")
     a = ap.parse_args()
@@ -138,7 +139,7 @@ def main() -> None:
                                                  location=list(HOME_BSIM), rotation=[0.0, 0.0, 0.0], ticks_per_sec=a.ticks)
     rec = None
     if a.record:
-        rec = Recorder(a.record, a.label, a.ticks, "air", tuple(int(v) for v in a.trail_bgr.split(",")), marker_dir=a.marker_dir)
+        rec = Recorder(a.record, a.label, a.ticks, "air", tuple(int(v) for v in a.trail_bgr.split(",")), marker_dir=a.marker_dir, cam=CAMERAS[a.cam_preset] if a.cam_preset else None)
         rec.add_sensor(scenario)
     with StageBRunner(profile, scenario, sc, a.log, recorder=rec, port=a.port, show_viewport=a.viewport) as runner:
         runner.run()

@@ -26,12 +26,21 @@ B_SCEN = B.SCENARIO_DIR
 import run_stage_d as D  # noqa: E402  (sets B.SCENARIO_DIR to the stage_d scenarios; restored per flight below)
 
 BLUE, ORANGE = "255,130,70", "60,140,255"      # BGR
-FLIGHTS = {
-    "air_astar":       dict(stage="B", scenario="b1_poles", planner="astar", cond="K2", res=1.0, label="AR  Hydrone  |  A*  |  K2 (poste oculto)", color=BLUE),
-    "air_rrt_star":    dict(stage="B", scenario="b1_poles", planner="rrt_star", cond="K2", res=0.0, label="AR  Hydrone  |  RRT*  |  K2 (poste oculto)", color=ORANGE),
-    "water_astar":     dict(stage="D", scenario="d1_poles", planner="astar", cond="K2", res=1.0, label="AGUA  BlueROV2  |  A*  |  K2 (poste oculto)", color=BLUE),
-    "water_rrt_star":  dict(stage="D", scenario="d1_poles", planner="rrt_star", cond="K2", res=0.0, label="AGUA  BlueROV2  |  RRT*  |  K2 (poste oculto)", color=ORANGE),
-}
+def _flights() -> dict:
+    """name -> flight. Scenarios: b1/d1 = poles, b2/d2 = wall with a gap, b4/d3 = two offset blocks; K2 = one unmapped obstacle found in flight."""
+    out = {}
+    for kind, stage, scen, what in (("air", "B", "b1_poles", "postes"), ("air_gate", "B", "b2_gate", "parede"),
+                                     ("air_blocks", "B", "b4_blocks", "blocos S"), ("water", "D", "d1_poles", "postes"),
+                                     ("water_gate", "D", "d2_gate", "parede"), ("water_blocks", "D", "d3_blocks", "blocos S")):
+        for planner, name, res, color in (("astar", "A*", 1.0, BLUE), ("rrt_star", "RRT*", 0.0, ORANGE)):
+            head = "AR Hydrone" if kind.startswith("air") else "AGUA BlueROV2"
+            out[f"{kind}_{planner}"] = dict(stage=stage, scenario=scen, planner=planner, cond="K2", res=res, color=color,
+                                             label=f"{head} | {name} | {what} (K2)",
+                                             cam="air_high" if kind in ("air_gate", "air_blocks") else None)
+    return out
+
+
+FLIGHTS = _flights()
 
 
 def reconstruct_meta(mp4: Path) -> dict:
@@ -81,6 +90,8 @@ def main() -> None:
             run_id = name if attempt == 0 else f"{name}_try{attempt + 1}"
             mp4 = out / f"{run_id}.mp4"
             extra = ["--record", str(mp4), "--label", f["label"], "--trail-bgr", f["color"], "--marker-dir", str(out / "runs" / run_id)]
+            if f.get("cam"):
+                extra += ["--cam-preset", f["cam"]]
             for m in ("started", "finished"):
                 (out / "runs" / run_id / m).unlink(missing_ok=True)
             print(f"[{name}] attempt {attempt + 1}", flush=True)
@@ -97,12 +108,20 @@ def main() -> None:
                 trim(out / f"{name}.mp4")
                 rows.append((name, ex))
                 break
-    with open(out / "videos.csv", "w", newline="") as fh:
-        w = csv.writer(fh)
-        w.writerow(["video", "scenario", "condition", "planner", "status", "planned_wh", "planned_length_m", "n_replans", "n_waypoints"])
-        for name, ex in rows:
-            w.writerow([f"{name}.mp4", ex["scenario"], ex["condition"], ex["planner"], ex["status"], round(ex.get("planned_wh", 0), 3),
-                        round(ex.get("planned_length_m", 0), 2), len(ex.get("replans", [])), ex.get("n_waypoints", "")])
+    csv_path = out / "videos.csv"
+    header = ["video", "scenario", "condition", "planner", "status", "planned_wh", "planned_length_m", "n_replans", "n_waypoints"]
+    table = {}
+    if csv_path.exists():                                      # keep the rows of the videos recorded earlier
+        with open(csv_path, newline="") as fh:
+            table = {r["video"]: r for r in csv.DictReader(fh)}
+    for name, ex in rows:
+        table[f"{name}.mp4"] = dict(zip(header, [f"{name}.mp4", ex["scenario"], ex["condition"], ex["planner"], ex["status"],
+                                                 round(ex.get("planned_wh", 0), 3), round(ex.get("planned_length_m", 0), 2),
+                                                 len(ex.get("replans", [])), ex.get("n_waypoints", "")]))
+    with open(csv_path, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=header)
+        w.writeheader()
+        w.writerows(table.values())
     print(f"{len(rows)} of {len(a.only)} videos recorded in {out}")
 
 

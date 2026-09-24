@@ -1,0 +1,16 @@
+# Stage D: two offset blocks (an S-curve, like B4 in the air) and an unmapped pole in the middle of the S. Frame as in d1_poles.
+# Clearances: vehicle radius 0.5 + water slack 1.0 = 1.5 m each side, so the passes beside the blocks are at east >= 3.0 (first block)
+# and east <= -3.0 (second block). The unmapped pole at (12.5, -4.5) sits in the west lane after the crossing, so the ROV has to swing out to
+# east <= -6.1 once it senses it.
+name: D3
+phase: sitl
+description: ROV, two offset blocks (S-curve) and an unmapped pole between them
+bounds: {north: [-2.0, 24.0], east: [-9.0, 9.0], up: [-7.0, -1.5]}
+waypoints:
+  - {name: inicio, pos: [0.0, 0.0, -3.0]}
+  - {name: alvo,   pos: [20.0, 0.0, -3.0]}
+known:
+  - {type: box, north: [6.0, 8.0],   east: [-9.0, 1.5], up: [-9.5, 0.5]}
+  - {type: box, north: [13.0, 15.0], east: [-1.5, 9.0], up: [-9.5, 0.5]}
+hidden:
+  - {type: cylinder, north: 12.5, east: -4.5, radius: 0.5, z: [-9.5, 0.5]}
