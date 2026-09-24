@@ -43,7 +43,7 @@ def add_thrust_column(truth_csv: Path) -> None:
     t.to_csv(truth_csv, index=False)
 
 
-def run_flight(run_id, scenario, planner, cond, seed, res, out: Path, boot_timeout, flight_timeout, viewport):
+def run_flight(run_id, scenario, planner, cond, seed, res, out: Path, boot_timeout, flight_timeout, viewport, runner_extra=None):
     d = out / "runs" / run_id
     d.mkdir(parents=True, exist_ok=True)
     scen_path = SCEN / f"{scenario}.yaml"
@@ -59,6 +59,7 @@ def run_flight(run_id, scenario, planner, cond, seed, res, out: Path, boot_timeo
         rcmd = [B.PY, str(STAGE_D / "rov_runner.py"), "--scenario", str(scen_path), "--log", str(d / "truth.csv"), "--fix-position"]
         if viewport:
             rcmd.append("--viewport")
+        rcmd += runner_extra or []
         runner = B.start(rcmd, d / "runner.log")
         if not B.wait_log(d / "runner.log", "STAGE_D_RUNNER_READY", boot_timeout, runner):
             print(f"  [{run_id}] BiguaSim did not come up (see {d / 'runner.log'})", flush=True)

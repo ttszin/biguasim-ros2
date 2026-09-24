@@ -160,6 +160,7 @@ def main() -> None:
                 s.goto(*(cmd.target if cmd.kind == "goto" else local_pos(s)))
                 print(f"  {cmd.kind} ({cmd.reason}) -> {np.round(cmd.target, 1).tolist()}", flush=True)
 
+        (Path(a.out).parent / "started").touch()          # the video recorder's clock starts here
         send(flight.begin(local_pos(s), time.time(), 0.0))
         t_cmd0 = time.time()
         while not flight.done and time.time() - t_cmd0 < MAX_MISSION_S:
@@ -168,6 +169,7 @@ def main() -> None:
                 send(flight.step(local_pos(s), local_vel(s), s.pos[0] - boot0, time.time()))
             time.sleep(LOOP_S)
         flight.abort("mission time limit", time.time(), local_pos(s))
+        (Path(a.out).parent / "finished").touch()
         if flight.status == "SUCESSO":
             for _ in range(30):          # hover a moment so the log ends at rest
                 s.pump()

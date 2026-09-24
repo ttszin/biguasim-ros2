@@ -6,3 +6,7 @@ results/**/runs/
 results/**/traces/
 results/*.log
 results/stage_c_discarded_race/
+
+# recorded flight videos and their side files (large; regenerate with record_videos.py)
+results/videos/*.mp4
+results/videos/*.meta.json

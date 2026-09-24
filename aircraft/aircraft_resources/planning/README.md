@@ -208,3 +208,15 @@ Matriz mínima: C1/C5/C6 em todas; C2→K5, C3→K2, C4→K4 (mais K1).
 
 Modelo da placa e memória livre com YOLO · matriz de ocupação vs. esparsa · integração BiguaSim×ArduPilot SITL · estimativa de posição subaquática no GUIDED (T5/T6)
 · sensores (LiDAR? sonar no WhiteBoat?) · o RSM pertence à 8.2? · altura da zona de transição μ (T7) · coeficientes de energia.
+
+## Vídeos dos voos e gráficos comparativos
+
+* `record_videos.py`: grava voos completos em SITL (ar: Hydrone/ArduCopter, Etapa B; água: BlueROV2/ArduSub, Etapa D) com `--record` nos runners.
+  A câmera é um `RGBCamera` do BiguaSim presa ao veículo (o `move_viewport` do BiguaSim desta versão não move o `ViewportCapture`), a 25 Hz, com painel
+  (tempo desde o início da rota, altura ou profundidade, velocidade) e a trilha voada desenhada no cenário (`draw_line`). Saída H.264 em
+  `results/videos/<nome>.mp4`, cortada do início da rota −3 s até o fim +3 s. Só `videos.csv` e `overview.png` são versionados; os `.mp4` não
+  (`.gitignore`), regenere com `python3 record_videos.py [--only nome ...]`. Gravar deixa a simulação ~2× mais lenta (o SITL roda em tempo simulado).
+  Convenção da câmera do BiguaSim: rotação `[roll, pitch, yaw]`, pitch POSITIVO olha para baixo.
+* `make_comparison_plots.py`: `results/comparison/stage_a_metrics.png` (campanha da Etapa A, 30 seeds) e `sitl_metrics.png` (voos em SITL), mais os CSVs
+  com os números. O "tempo até o primeiro caminho" do RRT\* é o de `t_first_solution_ms`; o `t_initial_ms` dele é o orçamento fixo (5 s por trecho), pois ele
+  continua refinando.

@@ -1,0 +1,5 @@
+video,scenario,condition,planner,status,planned_wh,planned_length_m,n_replans,n_waypoints
+air_astar.mp4,B1,K2,astar,SUCESSO,0.811,34.64,1,3
+air_rrt_star.mp4,B1,K2,rrt_star,SUCESSO,0.813,34.7,1,3
+water_astar.mp4,D1,K2,astar,SUCESSO,0.252,16.78,5,3
+water_rrt_star.mp4,D1,K2,rrt_star,SUCESSO,0.257,17.14,1,3

@@ -82,7 +82,7 @@ def start(cmd: list[str], log: Path, cwd: Path | None = None) -> subprocess.Pope
 def stop(p: subprocess.Popen | None) -> None:
     if p is None or p.poll() is not None:
         return
-    for sig, wait in ((signal.SIGINT, 4), (signal.SIGTERM, 4), (signal.SIGKILL, 2)):
+    for sig, wait in ((signal.SIGINT, 20), (signal.SIGTERM, 4), (signal.SIGKILL, 2)):
         try:
             os.killpg(p.pid, sig)
         except OSError:
@@ -108,7 +108,7 @@ def wait_log(path: Path, needle: str, timeout: float, proc: subprocess.Popen | N
 # --------------------------------------------------------------------------- one flight
 
 def run_flight(run_id: str, scenario: str, planner: str, cond: str, seed: int, res: float, out: Path,
-               boot_timeout: float, flight_timeout: float, viewport: bool) -> dict | None:
+               boot_timeout: float, flight_timeout: float, viewport: bool, runner_extra: list[str] | None = None) -> dict | None:
     d = out / "runs" / run_id
     d.mkdir(parents=True, exist_ok=True)
     scen_path = SCENARIO_DIR / f"{scenario}.yaml"
@@ -120,6 +120,7 @@ def run_flight(run_id: str, scenario: str, planner: str, cond: str, seed: int, r
         rcmd = [PY, str(STAGE_B / "sitl_runner.py"), "--scenario", str(scen_path), "--log", str(d / "truth.csv")]
         if viewport:
             rcmd.append("--viewport")
+        rcmd += runner_extra or []
         runner = start(rcmd, d / "runner.log")
         if not wait_log(d / "runner.log", "STAGE_B_RUNNER_READY", boot_timeout, runner):
             print(f"  [{run_id}] BiguaSim did not come up (see {d / 'runner.log'})", flush=True)

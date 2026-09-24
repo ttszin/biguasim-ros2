@@ -217,6 +217,7 @@ def main() -> None:
                 s.goto_surface(*(cmd.target if cmd.kind == "goto" else s.surface_pos()))
                 print(f"  {cmd.kind} ({cmd.reason}) -> {np.round(cmd.target, 1).tolist()}", flush=True)
 
+        (Path(a.out).parent / "started").touch()          # the video recorder's clock starts here
         send(flight.begin(pos0, time.time(), 0.0))
         t_cmd0 = time.time()
         while not flight.done and time.time() - t_cmd0 < MAX_MISSION_S:
@@ -225,6 +226,7 @@ def main() -> None:
                 send(flight.step(s.surface_pos(), s.surface_vel(), s.pos[0] - boot0, time.time()))
             time.sleep(LOOP_S)
         flight.abort("mission time limit", time.time(), s.surface_pos())
+        (Path(a.out).parent / "finished").touch()
         if flight.status == "SUCESSO":
             for _ in range(30):
                 s.pump()
