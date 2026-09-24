@@ -1,0 +1,13 @@
+# Stage D: a wall of known boxes with a 6 m gap (the route needs 3 m: vehicle radius 0.5 + water slack 1.0 on each side) and an unmapped block that narrows it to 4.5 m, like B2.
+name: D2
+phase: sitl
+description: ROV, wall with a gap; an unmapped block narrows the gap
+bounds: {north: [-2.0, 22.0], east: [-9.0, 9.0], up: [-7.0, -1.5]}
+waypoints:
+  - {name: inicio, pos: [0.0, 0.0, -3.0]}
+  - {name: alvo,   pos: [17.0, -1.0, -3.0]}
+known:
+  - {type: box, north: [8.0, 9.0], east: [-9.0, -3.5], up: [-9.5, 0.5]}
+  - {type: box, north: [8.0, 9.0], east: [2.5, 9.0],  up: [-9.5, 0.5]}
+hidden:
+  - {type: box, north: [8.0, 9.0], east: [-3.5, -2.0], up: [-9.5, 0.5]}

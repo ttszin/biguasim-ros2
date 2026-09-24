@@ -1,0 +1,18 @@
+# Stage D (SITL, underwater, BlueROV2/ArduSub). Frame: (north, east, up) metres, z = 0 at the WATER SURFACE
+# (BiguaSim x = 25 + north, y = -east; the ROV spawns at north 0, east 0, z = -2). Bounds keep the ROV between 1.5 and 7 m depth
+# (bed measured at about -9.7 m near x = 25) and inside north -2..22, east -9..9, a region the T2 tests already used.
+# Cylinders are BiguaSim props from the bed (-9.5) up through the surface (0.5).
+name: D1
+phase: sitl
+description: ROV, two poles on the direct line (one known, one unmapped)
+bounds: {north: [-2.0, 22.0], east: [-9.0, 9.0], up: [-7.0, -1.5]}
+waypoints:
+  - {name: inicio, pos: [0.0, 0.0, -2.5]}
+  - {name: alvo,   pos: [16.0, 3.0, -4.0]}
+known:
+  - {type: cylinder, north: 7.0, east: 0.8, radius: 0.5, z: [-9.5, 0.5]}
+hidden:
+  - {type: cylinder, north: 12.0, east: 2.6, radius: 0.5, z: [-9.5, 0.5]}
+mission_change:            # K5: the mission is changed 25 s in (the ROV is about 5 m along the route)
+  t: 25.0
+  goal: [16.0, -5.0, -4.5]

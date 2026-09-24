@@ -17,13 +17,14 @@ MISSIONS_DIR = PLANNING.parent / "missions"
 SCENARIO_DIR = HERE / "scenarios"
 
 
-def to_bsim(north: float, east: float, up: float) -> list[float]:
-    """Home-relative (north, east, up) -> BiguaSim world [x, y, z] (x forward = north, y left = -east)."""
-    return [HOME_BSIM[0] + north, HOME_BSIM[1] - east, HOME_BSIM[2] + up]
+def to_bsim(north: float, east: float, up: float, home=HOME_BSIM) -> list[float]:
+    """Local (north, east, up) -> BiguaSim world [x, y, z] (x forward = north, y left = -east). `home` is where the
+    local origin sits in BiguaSim coordinates (the aerial spawn by default; the ROV tests use z = 0, the water surface)."""
+    return [home[0] + north, home[1] - east, home[2] + up]
 
 
-def from_bsim(x: float, y: float, z: float) -> tuple[float, float, float]:
-    return x - HOME_BSIM[0], -(y - HOME_BSIM[1]), z - HOME_BSIM[2]
+def from_bsim(x: float, y: float, z: float, home=HOME_BSIM) -> tuple[float, float, float]:
+    return x - home[0], -(y - home[1]), z - home[2]
 
 
 def sitl_config() -> Config:

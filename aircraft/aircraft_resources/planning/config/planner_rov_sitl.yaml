@@ -1,0 +1,61 @@
+# Planner configuration for the BlueROV2 (ArduSub GUIDED) in SITL / BiguaSim: the underwater tests (Stage D).
+# Same as planner.yaml except: water cruise/vertical speed (the ROV runs at WP_SPD 0.2 m/s in t2_biguasim_bluerov2.parm)
+# and the RRT* budget. Energy coefficients are still PLACEHOLDERS (see planner.yaml).
+# Hyperparameters and physical constants for the T8.2 planners.
+# Everything here is read at run time -- nothing is hard-coded in the planners,
+# so RSM/DOE runs only need to write a different copy of this file.
+#
+# !! Values marked PLACEHOLDER are NOT measured/validated. Replace them before
+# !! using absolute energy numbers (Wh) from any experiment. Relative planner
+# !! comparisons are only meaningful once the coefficients are real.
+
+medium:
+  mu: 0.5                     # PLACEHOLDER (T7): half-height of the transition zone (m). air z>mu, transition |z|<=mu, water z<-mu
+
+margins:                      # clearance = vehicle radius + per-medium slack (m)
+  vehicle_radius: 0.5         # PLACEHOLDER (Hydrone size)
+  air_slack: 0.5
+  water_slack: 1.0            # larger underwater: position uncertainty (Zammit & van Kampen 2023)
+  uncertainty_fraction: 0.0   # K4: underwater position uncertainty, fraction of distance travelled (0.02..0.20); adds to water slack
+
+energy:                       # quadratic power-vs-thrust curves, P[W] = c2*T^2 + c1*T + c0  (Pinheiro et al., IROS 2024)
+  air:
+    cruise_speed: 3.0         # m/s
+    vertical_speed: 1.0       # m/s
+    coeffs: [0.03, 4.0, 20.0] # PLACEHOLDER [c2, c1, c0] (~220 W hover for 4 kg)
+    mass_kg: 4.0              # PLACEHOLDER
+    drag_area_cd: 0.05        # PLACEHOLDER 0.5*rho*Cd*A folded in, F = k*|v|*v  (N per (m/s)^2)
+  water:
+    cruise_speed: 0.2         # [ROV SITL] = WP_SPD in t2_biguasim_bluerov2.parm (final value, chosen for stability)
+    vertical_speed: 0.3       # [ROV SITL] first guess; recalibrate on the first flights
+    coeffs: [0.5, 5.0, 10.0]  # PLACEHOLDER [c2, c1, c0] (~40 W cruise)
+    net_weight_n: 0.0         # PLACEHOLDER weight - buoyancy (N, + = sinks); 0 = neutrally buoyant
+    drag_area_cd: 4.0         # PLACEHOLDER, F = k*|v|*v
+  transition:                 # counted separately from the medium costs
+    speed: 0.5                # m/s, vertical, inside |z|<=mu
+    power_w: 200.0            # PLACEHOLDER
+    fixed_wh: 0.05            # PLACEHOLDER, charged once per air<->water crossing
+  battery_wh: 100.0           # PLACEHOLDER, available energy at start
+  reserve_wh: 10.0            # kept in reserve (feasibility: remaining + return <= available - reserve)
+  max_segment_wh: null        # "restricao de consumo por segmento": reject edges above this (null = off)
+
+rrt_star:
+  step: 2.0                   # max expansion step (m)
+  rewire_radius: 5.0          # cap of the rewiring radius (m)
+  goal_bias: 0.08
+  goal_radius: 2.0
+  max_iter: 6000
+  time_budget_s: 4.0          # per planning cycle; fixed by the hardware, not optimised
+
+astar:
+  resolution: 1.0             # grid spacing (m); test at least two per scenario
+  heuristic_weight: 1.0
+  exact_edges: false          # true: exact continuous check on every edge (slow); false: raster + exact validation of the final path, retry exact on failure
+  grid_jitter: true           # A*_r: random grid offset in [0, resolution/2) per plan (Zammit & van Kampen 2022)
+  time_budget_s: 30.0
+
+map:
+  voxel_size: 0.10            # sparse occupancy voxel edge (m)
+
+postprocess:
+  min_gain: 0.01              # stop pruning when a pass reduces cost by less than 1 %

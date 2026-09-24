@@ -29,7 +29,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common_b import MISSIONS_DIR, PLANNING, SCENARIO_DIR, from_bsim, sitl_config  # noqa: E402
+from common_b import HOME_BSIM, MISSIONS_DIR, PLANNING, SCENARIO_DIR, from_bsim, sitl_config  # noqa: E402
 
 from energy import EnergyModel, J_PER_WH  # noqa: E402
 from scenario import load_scenario  # noqa: E402
@@ -66,7 +66,7 @@ def kill_leftovers() -> None:
         if not p.name.isdigit() or int(p.name) in protected:
             continue
         c = _cmdline(int(p.name))
-        if any(k in c for k in ("arducopter", "sim_vehicle.py", "sitl_runner.py", "sitl_exec.py", "t2_sitl_run.sh",
+        if any(k in c for k in ("arducopter", "ardusub", "rov_runner.py", "rov_exec.py", "sim_vehicle.py", "sitl_runner.py", "sitl_exec.py", "t2_sitl_run.sh",
                                 "biguasim_sim_runner", "hover_probe.py", "Linux/Biguasim/Binaries")):
             try:
                 os.kill(int(p.name), signal.SIGKILL)
@@ -162,7 +162,8 @@ def analyse(run_dir: Path, ex: dict, cfg, energy: EnergyModel, sc) -> dict:
     tr = tr[(tr["wall"] >= t0) & (tr["wall"] <= t1)]
     if len(tr) < 5:
         return row
-    loc = np.array([from_bsim(x, y, z) for x, y, z in zip(tr["x"], tr["y"], tr["z"])])
+    home = tuple(ex.get("home_bsim", HOME_BSIM))
+    loc = np.array([from_bsim(x, y, z, home) for x, y, z in zip(tr["x"], tr["y"], tr["z"])])
     vel = np.stack([tr["vx"], -tr["vy"], tr["vz"]], axis=1)              # north, east, up
     dt = np.diff(tr["wall"], prepend=tr["wall"][0])
     dt[0] = 0.0
@@ -170,7 +171,7 @@ def analyse(run_dir: Path, ex: dict, cfg, energy: EnergyModel, sc) -> dict:
     sim_dt[0] = 0.0
 
     # thrust-based energy: P(T) with the planner's air curves, T = the thrust BiguaSim applied
-    c2, c1, c0 = cfg.get("energy", "air")["coeffs"]
+    c2, c1, c0 = cfg.get("energy", ex.get("medium", "air"))["coeffs"]
     thrust = tr["thrust_n"]
     e_thrust = float(np.sum((c2 * thrust ** 2 + c1 * thrust + c0) * sim_dt)) / J_PER_WH
     # kinematic energy from ground-truth velocity/acceleration with the planner's own model
@@ -257,7 +258,7 @@ def figures(out: Path, rows: list[dict]) -> None:
         ax.legend(fontsize=6, ncol=2)
         az.set_xlim(*sc.bounds[0]); az.set_ylim(sc.bounds[2][0] - 1, sc.bounds[2][1] + 1)
         az.axhspan(sc.bounds[2][0], sc.bounds[2][1], color="tab:green", alpha=0.06)
-        az.set_xlabel("north (m)"); az.set_ylabel("altitude above home (m)"); az.set_title("side view (altitude vs north); green = allowed band")
+        az.set_xlabel("north (m)"); az.set_ylabel("z (m): Stage B above home, Stage D water surface = 0"); az.set_title("side view (z vs north); green = allowed band")
         av.set_xlabel("time (s)"); av.set_ylabel("ground speed (m/s)"); av.set_title("speed (BiguaSim ground truth)")
         fig.tight_layout()
         fig.savefig(figdir / f"stage_b_{name}.png", dpi=120)

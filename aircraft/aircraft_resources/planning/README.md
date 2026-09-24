@@ -196,9 +196,10 @@ Matriz mínima: C1/C5/C6 em todas; C2→K5, C3→K2, C4→K4 (mais K1).
    O BiguaSim **não** foi consultado para empuxo/potência dos propulsores; isso ainda precisa ser verificado e documentado.
 4. **Obstáculos são props sintéticos**, não a geometria real do Bridge (ponte/pilares não estão no mapa dos planejadores).
    `biguasim_replay.py --home/--yaw-deg` posiciona o cenário; confira no viewport. O replay do C3 (K1 e K2, A\*) rodou headless no BiguaSim e o agente seguiu a trajetória (erro máx. 0,40 m em 58 passos, lido do LocationSensor). **Não vi a cena**: o tamanho/orientação dos props (`spawn_prop` cilindro/caixa), o desenho do caminho e a posição em relação à ponte não foram inspecionados visualmente, e C1/C2/C4–C6 não foram reproduzidos no motor.
-5. **Etapa B (BiguaSim + ArduPilot SITL em GUIDED): feita só na parte aérea** (ver seção abaixo). A parte subaquática **não** foi testada em SITL: para o
-   Hydrone (mav_type 2), `set_reposition` do ArduPilot trata `altitude < -1`, `< 0` e `> 10` como manobras especiais sem GPS, e o GUIDED do ArduSub depende de estimativa
-   de posição subaquática (pendência T5/T6). A Etapa B fala MAVLink direto (pymavlink); a Etapa C passa pelo `mission_node`/MAVROS.
+5. **Etapa B (BiguaSim + ArduPilot SITL em GUIDED): parte aérea** (ver seção abaixo). **Etapa D: parte subaquática em SITL** com o BlueROV2/ArduSub
+   (`stage_d/`, `stage_d/NOTES.md`): 10 voos, 10 SUCESSO, sem colisão. **Ainda não testado em SITL:** o cruzamento ar↔água (transição) e a
+   incerteza de posição subaquática real (K4 segue simulada; o GPS_INPUT do ROV vem da verdade do BiguaSim). A Etapa B fala MAVLink direto
+   (pymavlink); a Etapa C passa pelo `mission_node`/MAVROS (só quadricóptero; a versão `sub` do `plan_route` não foi feita).
 6. **K4 usa incerteza proporcional à distância ao último ponto com GPS** (waypoint anterior ao primeiro subaquático), aproximação da esfera de incerteza.
 7. **Detecção de obstáculos é simulada** (pontos de superfície dentro de um raio); não há LiDAR/sonar reais (T4/T5/T6).
 8. **Modelo do seguidor** (cinemático com lag de velocidade e limite de aceleração) é simples de propósito (guia: "seguidor de caminho simples").

@@ -1,0 +1,9 @@
+# Stage D probe: empty water, no obstacles. Frame: (north, east, up) metres, z = 0 at the water surface
+# (BiguaSim x = 25 + north, y = -east). The ROV spawns at (25, 0, -2).
+name: D0
+phase: sitl
+description: Probe - dive and cross 10 m in empty water
+bounds: {north: [-2.0, 22.0], east: [-9.0, 9.0], up: [-7.0, -1.5]}
+waypoints:
+  - {name: inicio, pos: [0.0, 0.0, -2.0]}
+  - {name: alvo,   pos: [10.0, 0.0, -4.0]}
