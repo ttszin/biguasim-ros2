@@ -1,0 +1,12 @@
+# C3 (F2, air): short paths around the buoy, target visible. Stresses time per query inside the loop.
+name: C3
+phase: F2
+description: Short routes around the buoy with the target in view (time per query in the loop)
+bounds: {north: [-5.0, 30.0], east: [-20.0, 20.0], up: [1.5, 20.0]}
+waypoints:
+  - {name: origem, pos: [0.0, 0.0, 10.0]}
+  - {name: alvo,   pos: [20.0, 6.0, 4.0]}
+known:
+  - {type: cylinder, north: 12.0, east: 2.0, radius: 0.8, z: [-2.0, 6.0]}     # buoy
+hidden:
+  - {type: cylinder, north: 6.0, east: 1.8, radius: 0.5, z: [-2.0, 30.0]}      # pole on the direct line, not on the a-priori map

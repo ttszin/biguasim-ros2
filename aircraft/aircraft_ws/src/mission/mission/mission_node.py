@@ -6,18 +6,23 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from rclpy.callback_groups import ReentrantCallbackGroup
 
 import os
+import math
 import argparse
+import json
+import sys
 import threading
 import random
 import time
 import yaml
+import numpy as np
 
 from action_msgs.msg import GoalStatus
 from sensor_msgs.msg import NavSatFix
 from std_msgs.msg import String
-from mavros_msgs.msg import VfrHud, ExtendedState
+from mavros_msgs.msg import VfrHud, ExtendedState, PositionTarget
 from mavros_msgs.srv import SetMode
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Point, PoseStamped, TwistStamped
+from nav_msgs.msg import Odometry
 from vision_msgs.msg import Detection2DArray
 try:
     from px4_msgs.msg import VehicleGlobalPosition, AirspeedValidated
@@ -55,6 +60,15 @@ class MissionNode(Node):
         self.last_executed_step = -1 # To avoid re-executing the same step
         self.active_mission_goal_handle = None # Hold the goal handle of the active action
         self.wait_start_time = None # For "wait" mission steps
+        # 2026-08-30: last reposition request sent via 'reposition'/
+        # 'go_to_known_gps_waypoint', kept so a 'wait' step right after can
+        # keep re-sending it (see conops_callback) instead of leaving GUIDED
+        # coasting on a stale setpoint for the whole wait duration -- same
+        # root cause already documented below (search "doesn't hold its
+        # position") for why POSHOLD gets requested at mission end, just
+        # happening mid-mission during a wait instead of after the last step.
+        self._last_reposition_req = None
+        self._last_reposition_resend_time = None # throttle for the wait-refresh below
 
         self.own_drone_id = None
         drone_id_str = os.environ.get('DRONE_ID') # Get id from ENV VAR
@@ -157,6 +171,17 @@ class MissionNode(Node):
         # home position — captured on first GPS fix, used for north/east distance calculations
         self.home_lat = None
         self.home_lon = None
+        # wait_to_reach_waypoint (3D arrival, both autopilots): its own home
+        # (lat, lon, alt_msl) captured by _capture_plan_home on the first
+        # position fix where all three are known -- i.e. on the ground, before
+        # takeoff -- so it is the same origin go_to_known_gps_waypoint measures from.
+        self.plan_home = None
+        self.waypoint_wait_active = False
+        self.waypoint_wait_target = (0.0, 0.0, 0.0)  # north, east, up (m from home)
+        self.waypoint_wait_threshold = 1.5
+        self.waypoint_wait_start = None
+        self.waypoint_wait_timeout = 60.0
+        self.waypoint_wait_last_log = 0.0
         # ROV waypoint tracking
         self.rov_position = None
         self.rov_waypoint_waiting = False
@@ -213,6 +238,58 @@ class MissionNode(Node):
             Point, '/bluerov0/local_position', self._rov_pos_cb,
             10, callback_group=self.subscriber_callback_group)
         self._rov_cmd_pub = self.create_publisher(Point, '/bluerov0/cmd_pos_yaw', 10)
+        # 2026-09-18: precision velocity-streaming navigation ('precision_navigate'
+        # action, see conops_callback/execute step below). Uses
+        # /mavros/global_position/local (nav_msgs/Odometry, ENU: x=east, y=north,
+        # z=up) as feedback -- same topic log_hover_stability.py already validated
+        # as the one ArduSub actually publishes to (it never publishes
+        # /mavros/local_position/odom, unlike Copter/Rover). Output is a
+        # continuously-streamed FRAME_LOCAL_NED velocity-only PositionTarget on
+        # /mavros/setpoint_raw/local, matching the ENU velocity convention
+        # ardupilot_interface.cpp's own GPS-free velocity branch already uses
+        # (velocity.x=east, velocity.y=north, velocity.z=up).
+        self.precision_nav_pos = None  # (east, north, up) from the callback below
+        self.create_subscription(
+            Odometry, '/mavros/global_position/local', self._precision_nav_odom_cb,
+            self.qos_profile, callback_group=self.subscriber_callback_group)
+        self._precision_nav_vel_pub = self.create_publisher(
+            PositionTarget, '/mavros/setpoint_raw/local', 10)
+        self.precision_nav_active = False
+        self.precision_nav_timer = None
+
+        # Trajectory planning ('plan_route' + 'follow_route', T8.2). The planners (A*, RRT*) and the flight
+        # logic live in aircraft_resources/planning (PlannedFlight); this node only supplies the vehicle side:
+        # position/velocity from MAVROS' local frame (ENU, origin = home = EKF origin) and waypoints out through
+        # the same SetReposition service / GUIDED path 'go_to_known_gps_waypoint' uses. Local frame used by the
+        # planner: (north, east, up) metres relative to home.
+        self.route_flight = None
+        self.route_active = False
+        self.route_started = False
+        self.route_timer = None
+        self.route_timeout = 300.0
+        self.route_t0 = 0.0
+        self.route_result_file = '/tmp/route_result.json'
+        self._route_busy = False
+        # Reliable delivery of goto/hold commands (see _route_send): ardupilot_interface answers "Another
+        # service/action is active" to a SetReposition that arrives while it is still handling the previous one
+        # (each call takes about a second), and a rejected command is otherwise lost for good.
+        self._route_cmd = None
+        self._route_inflight = False
+        self._route_last_attempt = 0.0
+        self._route_lock = threading.Lock()
+        self.route_send_failures = 0
+        self.route_pose = None   # (east, north, up)
+        self.route_vel = None    # (east, north, up) m/s
+        self.create_subscription(
+            PoseStamped, '/mavros/local_position/pose', self._route_pose_cb,
+            self.qos_profile, callback_group=self.subscriber_callback_group)
+        self.create_subscription(
+            TwistStamped, '/mavros/local_position/velocity_local', self._route_vel_cb,
+            self.qos_profile, callback_group=self.subscriber_callback_group)
+        # New final goal during the flight (mission change, e.g. decided by T11): x=north, y=east, z=up (m from home)
+        self.create_subscription(
+            Point, '/planner/new_goal', self._route_new_goal_cb,
+            10, callback_group=self.subscriber_callback_group)
         # self.create_subscription( # 1Hz
         #     SwarmObs, '/tracks', self.ground_tracks_callback,
         #     self.qos_profile, callback_group=self.subscriber_callback_group)
@@ -276,11 +353,30 @@ class MissionNode(Node):
             SetMode, '/mavros/set_mode', callback_group=self.service_callback_group
         )
 
+    def _capture_plan_home(self):
+        # Caller holds data_lock.
+        if (self.plan_home is None and self.lat is not None and self.lon is not None
+                and self.alt_msl is not None
+                and not (abs(self.lat) < 1e-6 and abs(self.lon) < 1e-6)):
+            self.plan_home = (self.lat, self.lon, self.alt_msl)
+
+    def _position_from_plan_home(self):
+        """(north, east, up) in metres from plan_home, or None if not known yet."""
+        with self.data_lock:
+            if self.plan_home is None or self.lat is None or self.alt_msl is None:
+                return None
+            h_lat, h_lon, h_alt = self.plan_home
+            lat, lon, alt = self.lat, self.lon, self.alt_msl
+        north = (lat - h_lat) * 111320.0
+        east = (lon - h_lon) * 111320.0 * math.cos(math.radians(h_lat))
+        return north, east, alt - h_alt
+
     def px4_global_position_callback(self, msg): # Mutally exclusive with mavros_global_position_callback
         with self.data_lock:
             self.lat = msg.lat
             self.lon = msg.lon
             self.alt_msl = msg.alt
+            self._capture_plan_home()
 
     def airspeed_validated_callback(self, msg): # Mutally exclusive with vfr_hud_callback
         with self.data_lock:
@@ -297,12 +393,19 @@ class MissionNode(Node):
             if self.home_lat is None and position_valid:
                 self.home_lat = msg.latitude
                 self.home_lon = msg.longitude
+            self._capture_plan_home()
+
+    def _precision_nav_odom_cb(self, msg):
+        with self.data_lock:
+            p = msg.pose.pose.position
+            self.precision_nav_pos = (p.x, p.y, p.z)  # ENU: east, north, up
 
     def vfr_hud_callback(self, msg): # Mutally exclusive with airspeed_validated_callback
         with self.data_lock:
             self.alt_msl = msg.altitude
             self.heading = msg.heading
             self.airspeed = msg.airspeed
+            self._capture_plan_home()
 
     def yolo_detections_callback(self, msg):
         with self.data_lock:
@@ -528,6 +631,235 @@ class MissionNode(Node):
         except Exception as e:
             self.get_logger().error(f'Service call failed: {e}')
             self.mission_step = -1
+
+    # ------------------------------------------------------------------ planned routes (T8.2)
+
+    def _route_pose_cb(self, msg):
+        with self.data_lock:
+            p = msg.pose.position
+            self.route_pose = (p.x, p.y, p.z)  # ENU: east, north, up
+
+    def _route_vel_cb(self, msg):
+        with self.data_lock:
+            v = msg.twist.linear
+            self.route_vel = (v.x, v.y, v.z)   # ENU
+
+    def _route_new_goal_cb(self, msg):
+        if self.route_flight is not None and self.route_active:
+            self.get_logger().info(
+                f"route: new goal received north={msg.x:.1f} east={msg.y:.1f} up={msg.z:.1f}")
+            self.route_flight.set_goal([msg.x, msg.y, msg.z])
+        else:
+            self.get_logger().warn("route: new goal ignored, no route is being followed")
+
+    def _write_route_result(self):
+        if self.route_flight is None:
+            return
+        try:
+            self.route_flight.rec['send_failures'] = self.route_send_failures
+            with open(self.route_result_file, 'w') as f:
+                json.dump(self.route_flight.result(), f)
+            self.get_logger().info(f"route: result written to {self.route_result_file}")
+        except Exception as e:  # never let a logging problem stop the mission
+            self.get_logger().error(f"route: could not write result file: {e}")
+
+    def _plan_route(self, params) -> bool:
+        """'plan_route' action: build the a-priori map, plan every leg with A* or RRT*, check the energy budget.
+        Blocking on purpose (call it BEFORE takeoff: RRT* uses its whole time budget). Returns False when the
+        mission must not fly (SEM_CAMINHO, TIMEOUT, ENERGIA_INSUFICIENTE)."""
+        planning_path = os.getenv('AAS_PLANNING_PATH', '/aas/aircraft_resources/planning')
+        if planning_path not in sys.path:
+            sys.path.insert(0, planning_path)
+        try:
+            from config import Config
+            from flight_executive import PlannedFlight
+            from scenario import load_scenario
+        except Exception as e:
+            self.get_logger().error(f"plan_route: cannot import the planning package from {planning_path}: {e}")
+            return False
+        cfg_path = params.get('config', os.path.join(planning_path, 'config', 'planner_sitl.yaml'))
+        if not os.path.exists(cfg_path):
+            cfg_path = None  # falls back to planning/config/planner.yaml
+        cfg = Config.load(cfg_path)
+        if params.get('overrides'):
+            cfg = cfg.override(**params['overrides'])
+        scenario = load_scenario(params['scenario'])
+        planner = str(params.get('planner', 'astar'))
+        resolution = float(params['resolution']) if 'resolution' in params else 1.0
+        self.route_result_file = str(params.get('result_file', '/tmp/route_result.json'))
+        self.route_flight = PlannedFlight(
+            scenario, cfg, planner, str(params.get('condition', 'K1')), int(params.get('seed', 0)),
+            resolution=resolution, mission_change=params.get('mission_change'),
+            energy_available_wh=params.get('energy_available_wh'),
+            max_flight_s=float(params.get('max_flight_s', 420.0)))
+        ok, status, detail = self.route_flight.plan()
+        if not ok:
+            self.get_logger().error(f"plan_route: {status}: {detail}")
+            self._write_route_result()
+            return False
+        self.get_logger().info(
+            f"plan_route: {planner} {status}: {detail}; takeoff altitude for the first waypoint = "
+            f"{self.route_flight.takeoff_altitude:.1f} m")
+        return True
+
+    def _route_send(self, cmd):
+        """Queue a goto/hold; the latest command wins. Delivered by _route_deliver, one service call at a time,
+        and repeated until ardupilot_interface accepts it (a rejected command is otherwise lost for good)."""
+        if cmd is None:
+            return
+        with self._route_lock:
+            self._route_cmd = cmd
+        self.get_logger().info(
+            f"route: {cmd.kind} ({cmd.reason}) north={cmd.target[0]:.1f} east={cmd.target[1]:.1f} up={cmd.target[2]:.1f}")
+        self._route_deliver()
+
+    def _route_deliver(self):
+        with self._route_lock:
+            cmd = self._route_cmd
+            if cmd is None or self._route_inflight:
+                return
+            if time.time() - self._route_last_attempt < 0.25:
+                return
+            if self._reposition_client is None or not self._reposition_client.service_is_ready():
+                return  # retried by the next tick
+            req = SetReposition.Request()
+            req.north, req.east, req.altitude = float(cmd.target[0]), float(cmd.target[1]), float(cmd.target[2])
+            self._route_inflight = True
+            self._route_last_attempt = time.time()
+        future = self._reposition_client.call_async(req)
+        future.add_done_callback(lambda f, c=cmd: self._route_delivered(f, c))
+
+    def _route_delivered(self, future, cmd):
+        ok = False
+        try:
+            ok = bool(future.result().success)
+        except Exception as e:
+            self.get_logger().error(f"route: SetReposition call raised: {e}")
+        with self._route_lock:
+            self._route_inflight = False
+            if ok:
+                if self._route_cmd is cmd:   # a newer command may have been queued meanwhile: keep it
+                    self._route_cmd = None
+            else:
+                self.route_send_failures += 1
+        if not ok:
+            self.get_logger().warn(f"route: {cmd.kind} not accepted by the interface, will retry (failures so far: {self.route_send_failures})")
+
+    def _route_finish(self):
+        self.route_active = False
+        if self.route_timer is not None:
+            self.route_timer.cancel()
+            self.route_timer = None
+        flight = self.route_flight
+        self.get_logger().info(f"route: finished, status={flight.status} {flight.detail}")
+        self._write_route_result()
+        if flight.status == 'SUCESSO':
+            self.mission_step += 1
+        else:
+            self.mission_step = -1
+
+    def _route_tick(self):
+        """10Hz loop of the 'follow_route' action: feed the vehicle state to PlannedFlight, execute its commands."""
+        self._route_deliver()   # retry a command the interface rejected
+        if not self.route_active or self._route_busy:
+            return
+        self._route_busy = True
+        try:
+            with self.data_lock:
+                pose, vel = self.route_pose, self.route_vel
+            if pose is None:
+                return  # no local pose yet
+            pos = np.array([pose[1], pose[0], pose[2]])                     # north, east, up
+            v = np.array([vel[1], vel[0], vel[2]]) if vel is not None else np.zeros(3)
+            wall, t_sim = time.time(), self.get_clock().now().nanoseconds / 1e9
+            flight = self.route_flight
+            if not self.route_started:
+                self.route_started, self.route_t0 = True, wall
+                self.get_logger().info(f"route: following, hover at north={pos[0]:.2f} east={pos[1]:.2f} up={pos[2]:.2f}")
+                self._route_send(flight.begin(pos, wall, t_sim))
+            else:
+                self._route_send(flight.step(pos, v, t_sim, wall))
+            if not flight.done and wall - self.route_t0 > self.route_timeout:
+                flight.abort("route timeout", wall, pos)
+            if flight.done:
+                self._route_finish()
+        finally:
+            self._route_busy = False
+
+    def _precision_nav_tick(self):
+        """10Hz velocity-streaming control loop for the 'precision_navigate'
+        action -- see its dispatch comment above for why this exists instead of
+        using ArduSub's own wp_nav position control."""
+        if not self.precision_nav_active:
+            return
+        with self.data_lock:
+            pos = self.precision_nav_pos
+        if pos is None:
+            return  # no odometry yet, wait for the next tick rather than command garbage
+
+        cur_e, cur_n, cur_u = pos
+        tgt_e, tgt_n, tgt_u = self.precision_nav_target
+        err_e, err_n, err_u = tgt_e - cur_e, tgt_n - cur_n, tgt_u - cur_u
+        dist = (err_e**2 + err_n**2 + err_u**2) ** 0.5
+
+        elapsed = (self.get_clock().now() - self.precision_nav_start_time).nanoseconds / 1e9
+
+        if dist <= self.precision_nav_tolerance:
+            self.get_logger().info(f"precision_navigate: arrived (dist={dist:.3f}m, t={elapsed:.1f}s)")
+            self._precision_nav_stop()
+            self.mission_step += 1
+            return
+        if elapsed > self.precision_nav_timeout:
+            self.get_logger().error(f"precision_navigate: timeout (dist={dist:.3f}m remaining after {elapsed:.1f}s)")
+            self._precision_nav_stop()
+            self.mission_step = -1
+            return
+
+        # P controller, clamped to max_speed on the combined 3D vector (not
+        # per-axis) so a long diagonal doesn't silently exceed the intended
+        # speed limit -- scales all three components down together, preserving
+        # direction.
+        vel_e, vel_n, vel_u = (self.precision_nav_kp * e for e in (err_e, err_n, err_u))
+        speed = (vel_e**2 + vel_n**2 + vel_u**2) ** 0.5
+        if speed > self.precision_nav_max_speed:
+            scale = self.precision_nav_max_speed / speed
+            vel_e, vel_n, vel_u = vel_e * scale, vel_n * scale, vel_u * scale
+
+        msg = PositionTarget()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.coordinate_frame = PositionTarget.FRAME_LOCAL_NED
+        msg.type_mask = (
+            PositionTarget.IGNORE_PX | PositionTarget.IGNORE_PY | PositionTarget.IGNORE_PZ |
+            PositionTarget.IGNORE_AFX | PositionTarget.IGNORE_AFY | PositionTarget.IGNORE_AFZ |
+            PositionTarget.IGNORE_YAW | PositionTarget.IGNORE_YAW_RATE
+        )
+        msg.velocity.x = vel_e  # ENU: x=east
+        msg.velocity.y = vel_n  # ENU: y=north
+        msg.velocity.z = vel_u  # ENU: z=up
+        self._precision_nav_vel_pub.publish(msg)
+
+    def _precision_nav_stop(self):
+        self.precision_nav_active = False
+        if self.precision_nav_timer is not None:
+            self.precision_nav_timer.cancel()
+            self.precision_nav_timer = None
+        # One explicit zero-velocity command so the vehicle doesn't coast on
+        # whatever was last streamed once the timer (and thus new commands)
+        # stops -- same "stale setpoint" failure class already root-caused
+        # for the wait-refresh fix above, avoided here by never leaving a
+        # nonzero velocity as the last thing ArduSub received.
+        msg = PositionTarget()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.coordinate_frame = PositionTarget.FRAME_LOCAL_NED
+        msg.type_mask = (
+            PositionTarget.IGNORE_PX | PositionTarget.IGNORE_PY | PositionTarget.IGNORE_PZ |
+            PositionTarget.IGNORE_AFX | PositionTarget.IGNORE_AFY | PositionTarget.IGNORE_AFZ |
+            PositionTarget.IGNORE_YAW | PositionTarget.IGNORE_YAW_RATE
+        )
+        msg.velocity.x = 0.0
+        msg.velocity.y = 0.0
+        msg.velocity.z = 0.0
+        self._precision_nav_vel_pub.publish(msg)
 
     def conops_callback(self):
         # If an ROS Action is running, do nothing
@@ -791,6 +1123,29 @@ class MissionNode(Node):
                 self.vision_land_last_send = self.get_clock().now()
             return
 
+        if self.waypoint_wait_active:
+            pos = self._position_from_plan_home()
+            elapsed = (self.get_clock().now() - self.waypoint_wait_start).nanoseconds / 1e9
+            if pos is not None:
+                tn, te, tu = self.waypoint_wait_target
+                err = math.sqrt((pos[0] - tn) ** 2 + (pos[1] - te) ** 2 + (pos[2] - tu) ** 2)
+                if err < self.waypoint_wait_threshold:
+                    self.get_logger().info(
+                        f"wait_to_reach_waypoint: arrived — N={pos[0]:.1f} E={pos[1]:.1f} U={pos[2]:.1f} "
+                        f"(target {tn:.1f}, {te:.1f}, {tu:.1f}; err={err:.2f}m, {elapsed:.0f}s).")
+                    self.waypoint_wait_active = False
+                    self.mission_step += 1
+                    return
+                if elapsed - self.waypoint_wait_last_log >= 5.0:
+                    self.waypoint_wait_last_log = elapsed
+                    self.get_logger().info(
+                        f"wait_to_reach_waypoint: err={err:.1f}m (N={pos[0]:.1f} E={pos[1]:.1f} U={pos[2]:.1f})")
+            if elapsed > self.waypoint_wait_timeout:
+                self.get_logger().error("Timeout in wait_to_reach_waypoint.")
+                self.waypoint_wait_active = False
+                self.mission_step = -1
+            return
+
         if self.reach_position_active:
             with self.data_lock:
                 lat = self.lat
@@ -816,6 +1171,28 @@ class MissionNode(Node):
         if self.wait_start_time is not None:
             elapsed = (self.get_clock().now() - self.wait_start_time).nanoseconds / 1e9
             if elapsed < self.current_wait_duration:
+                # 2026-08-30: keep GUIDED's setpoint fresh during the wait
+                # instead of leaving it coasting on whatever was last sent
+                # by the waypoint step (see _last_reposition_req above).
+                # Throttled to every 5s (not every conops_callback 1Hz tick)
+                # -- confirmed live that resending every second introduces
+                # real target jitter (dataflash PSCD.DPD, ArduSub's own
+                # interpreted absolute depth target, swinging as far as
+                # +1.1m between resends despite the relative altitude we
+                # send being the exact same constant every time -- ArduSub
+                # re-derives FRAME_GLOBAL_REL_ALT's absolute target from its
+                # own live EKF home-altitude estimate on every new message,
+                # so each resend injects a fresh slice of that estimate's
+                # small ongoing noise). 5s still refreshes far more often
+                # than the ~40s it took GUIDED to start drifting on a stale
+                # setpoint, at 1/5th the injected noise. Sub-only for now,
+                # same scope as the POSHOLD-at-mission-end fix this mirrors.
+                if os.getenv('DRONE_TYPE', '') == 'sub' and self._last_reposition_req is not None:
+                    now = self.get_clock().now()
+                    if (self._last_reposition_resend_time is None or
+                            (now - self._last_reposition_resend_time).nanoseconds / 1e9 >= 5.0):
+                        self._last_reposition_resend_time = now
+                        self._call_service_no_advance(self._reposition_client, self._last_reposition_req)
                 return # Still waiting
             else:
                 self.get_logger().info(f"Wait complete")
@@ -845,7 +1222,28 @@ class MissionNode(Node):
                 # ends without disarm/land, matching real usage where a
                 # surface vehicle isn't expected to fight ambient current
                 # the way GUIDED alone was found to fail at underwater.
-                if os.getenv('DRONE_TYPE', '') == 'sub' and self._set_mode_client is not None:
+                # 2026-08-30: DISABLED (operator-directed). The POSHOLD
+                # switch above was the fix for GUIDED not holding
+                # indefinitely, but POSHOLD turned out to have its own,
+                # worse failure mode in this headless setup: its horizontal
+                # control (ArduSub/mode_poshold.cpp's control_horizontal())
+                # commands velocity from RC forward/lateral channels, not a
+                # fixed point -- with no RC connected, it never recovers
+                # whatever had already drifted before it engaged, and falls
+                # through to a fully open-loop RC->motor path if
+                # position_ok() ever flickers false (a real, documented
+                # occurrence with this sim's synthetic GPS). Confirmed live
+                # (2026-08-30): a mission-end POSHOLD engagement went
+                # violently unstable -- NED position swinging tens of
+                # metres in a few seconds (z: 0.15 -> 15.74, y: 4.67 ->
+                # 164.33, x: 4.05 -> -23.56), visually described as
+                # "spinning like a top" -- far worse than the original
+                # GUIDED-coasting problem this was meant to fix. The
+                # wait-refresh fix above (keeps GUIDED's own setpoint fresh
+                # throughout the hold) is this project's actual hover
+                # mechanism now; nothing should keep running after Mission
+                # Complete instead of just disarming/ending cleanly.
+                if False and os.getenv('DRONE_TYPE', '') == 'sub' and self._set_mode_client is not None:
                     if self._set_mode_client.wait_for_service(timeout_sec=2.0):
                         request = SetMode.Request()
                         request.custom_mode = "POSHOLD"
@@ -915,6 +1313,86 @@ class MissionNode(Node):
             if not self.send_goal(self._offboard_client, goal):
                 return
 
+        elif action_type == 'precision_navigate':
+            # 2026-09-18: velocity-streaming navigation, bypassing ArduSub's own
+            # wp_nav/GlobalPositionTarget position-control stack entirely (that's
+            # where most of this session's BlueROV2 instabilities actually lived:
+            # its braking-distance/deceleration profile, its GUIDED-setpoint-goes-
+            # stale-without-refresh bug, and the trajectory transients at
+            # waypoint-arrival that repeatedly destabilized pitch). Streams a
+            # continuously-recomputed velocity setpoint straight to
+            # /mavros/setpoint_raw/local at 10Hz instead of a fixed position target
+            # -- ArduSub's own rate/attitude control loops (the part that actually
+            # needs SITL) still run underneath, but none of wp_nav's own shaping
+            # does. Sub-only for now (needs /mavros/global_position/local, the
+            # topic log_hover_stability.py already confirmed is the one ArduSub
+            # actually publishes to, unlike Copter/Rover's local_position/odom).
+            if os.getenv('DRONE_TYPE', '') != 'sub':
+                self.get_logger().warn("precision_navigate is only supported for 'sub' drone type. Skip.")
+                self.mission_step += 1
+                return
+            self.precision_nav_target = (
+                float(params.get('east', 0.0)),
+                float(params.get('north', 0.0)),
+                float(params.get('altitude', 0.0)),  # ENU up, matches go_to_known_gps_waypoint's altitude semantics
+            )
+            self.precision_nav_kp = float(params.get('kp', 0.3))
+            self.precision_nav_max_speed = float(params.get('max_speed', 0.3))  # m/s
+            self.precision_nav_tolerance = float(params.get('tolerance', 0.15))  # m
+            self.precision_nav_timeout = float(params.get('timeout', 60.0))
+            self.precision_nav_start_time = self.get_clock().now()
+            self.precision_nav_active = True
+            self.last_executed_step = self.mission_step
+            if self.precision_nav_timer is not None:
+                self.precision_nav_timer.cancel()
+            self.precision_nav_timer = self.create_timer(
+                0.1, self._precision_nav_tick, callback_group=self.timer_callback_group)  # 10Hz
+            self.get_logger().info(
+                f"precision_navigate: target east={self.precision_nav_target[0]:.2f} "
+                f"north={self.precision_nav_target[1]:.2f} up={self.precision_nav_target[2]:.2f}, "
+                f"kp={self.precision_nav_kp}, max_speed={self.precision_nav_max_speed} m/s, "
+                f"tolerance={self.precision_nav_tolerance} m")
+            return
+
+        elif action_type == 'plan_route':
+            # Plan the whole route with A* ('astar') or RRT* ('rrt_star') before flying it: builds the map
+            # from a scenario file (known obstacles; the unmapped ones stay hidden until sensed), plans, and
+            # checks the energy budget (ENERGIA_INSUFICIENTE stops the mission). Place it BEFORE 'takeoff'.
+            if os.getenv('DRONE_TYPE', '') != 'quad':
+                self.get_logger().warn("plan_route is only supported for 'quad' drone type. Skip.")
+                self.mission_step += 1
+                return
+            # Mark the step as running BEFORE the (possibly multi-second) planning: conops_callback fires every
+            # second on a multi-threaded executor, and without this the same step is started again while RRT*
+            # is still planning (found live: parallel plan_route calls raced on self.route_flight).
+            self.last_executed_step = self.mission_step
+            try:
+                planned = self._plan_route(params)
+            except Exception as e:  # never take the whole mission node down: fail the mission cleanly instead
+                self.get_logger().error(f"plan_route: unexpected error: {type(e).__name__}: {e}")
+                planned = False
+            if not planned:
+                self.mission_step = -1
+                return
+            self.mission_step += 1
+            return
+
+        elif action_type == 'follow_route':
+            # Fly the route made by 'plan_route' in GUIDED (after 'takeoff'). Replans when the route ahead is
+            # cut by newly sensed obstacles; accepts a new final goal on /planner/new_goal (mission change).
+            if self.route_flight is None or self.route_flight.done:
+                self.get_logger().error("follow_route: no valid route (run plan_route first).")
+                self.mission_step = -1
+                return
+            self.route_timeout = float(params.get('timeout', 300.0))
+            self.route_started = False
+            self.route_active = True
+            self.last_executed_step = self.mission_step
+            if self.route_timer is not None:
+                self.route_timer.cancel()
+            self.route_timer = self.create_timer(0.1, self._route_tick, callback_group=self.timer_callback_group)
+            return
+
         elif action_type in ('reposition', 'go_to_known_gps_waypoint'):
             # 'rover' (BlueBoat/Rover position-hold test): same GlobalPositionTarget/GUIDED
             # mechanism ardupilot_interface.cpp already uses for 'quad' in this altitude
@@ -932,6 +1410,7 @@ class MissionNode(Node):
             req.east = float(params.get('east', 0.0))
             req.north = float(params.get('north', 0.0))
             req.altitude = float(params.get('altitude', 50.0))
+            self._last_reposition_req = req # see conops_callback's wait-refresh
             self.call_service(self._reposition_client, req)
             
         elif action_type == 'speed':
@@ -1042,6 +1521,26 @@ class MissionNode(Node):
             self.get_logger().info(
                 f"vision_land: centering on '{self.vision_land_target_class_id}' "
                 f"(timeout={self.vision_land_timeout}s).")
+            return
+
+        elif action_type == 'wait_to_reach_waypoint':
+            # 3D arrival check (north, east, altitude above home) for the same
+            # frame go_to_known_gps_waypoint uses. Unlike wait_to_reach_position
+            # (north only, MAVROS-only) it works for PX4 and ArduPilot. Meant to
+            # follow each go_to_known_gps_waypoint of a planned path, since that
+            # step advances as soon as the command is sent, not on arrival.
+            self.waypoint_wait_target = (float(params.get('north', 0.0)),
+                                         float(params.get('east', 0.0)),
+                                         float(params.get('altitude', 0.0)))
+            self.waypoint_wait_threshold = float(params.get('threshold', 1.5))
+            self.waypoint_wait_timeout = float(params.get('timeout', 60.0))
+            self.waypoint_wait_start = self.get_clock().now()
+            self.waypoint_wait_last_log = 0.0
+            self.waypoint_wait_active = True
+            self.get_logger().info(
+                f"wait_to_reach_waypoint: target N={self.waypoint_wait_target[0]:.1f} "
+                f"E={self.waypoint_wait_target[1]:.1f} U={self.waypoint_wait_target[2]:.1f} "
+                f"(threshold={self.waypoint_wait_threshold:.1f}m, timeout={self.waypoint_wait_timeout:.0f}s).")
             return
 
         elif action_type == 'wait_to_reach_position':

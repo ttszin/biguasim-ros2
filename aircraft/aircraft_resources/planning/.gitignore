@@ -1,0 +1,8 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+# raw per-flight / per-run logs (large); the CSVs, figures, NOTES.md and the PDF are versioned
+results/**/runs/
+results/**/traces/
+results/*.log
+results/stage_c_discarded_race/

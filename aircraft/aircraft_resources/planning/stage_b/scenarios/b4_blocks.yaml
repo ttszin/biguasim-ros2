@@ -1,0 +1,14 @@
+# Stage B/C (SITL), aerial only: two building-like blocks offset from each other force an S-shaped route; a pole between
+# them is not on the a-priori map. Blocks are props from the water up to 12 m above home.
+name: B4
+phase: sitl
+description: Two offset blocks (S-curve) and an unmapped pole between them
+bounds: {north: [-2.0, 42.0], east: [-10.0, 10.0], up: [4.0, 9.0]}
+waypoints:
+  - {name: inicio, pos: [0.0, 0.0, 5.0]}
+  - {name: alvo,   pos: [36.0, 0.0, 5.0]}
+known:
+  - {type: box, north: [12.0, 16.0], east: [-10.0, 2.0], up: [-13.4, 12.0]}
+  - {type: box, north: [24.0, 28.0], east: [-2.0, 10.0], up: [-13.4, 12.0]}
+hidden:
+  - {type: cylinder, north: 20.0, east: 0.5, radius: 0.5, z: [-13.4, 12.0]}

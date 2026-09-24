@@ -1,0 +1,15 @@
+# Stage B/C (SITL), aerial only: a beam across the whole corridor at 5.6-6.4 m above home. With the vehicle margin (1.5 m)
+# there is no room under it inside the altitude bounds, so the route must go OVER it (vertical avoidance). A known pole
+# before it and an unmapped one after it.
+name: B5
+phase: sitl
+description: Overhead beam across the corridor (fly over it), a known and an unmapped pole
+bounds: {north: [-2.0, 42.0], east: [-10.0, 10.0], up: [4.0, 9.0]}
+waypoints:
+  - {name: inicio, pos: [0.0, 0.0, 7.0]}
+  - {name: alvo,   pos: [36.0, 0.0, 7.0]}
+known:
+  - {type: box, north: [20.0, 22.0], east: [-10.0, 10.0], up: [5.6, 6.4]}
+  - {type: cylinder, north: 10.0, east: -2.0, radius: 0.5, z: [-13.4, 12.0]}
+hidden:
+  - {type: cylinder, north: 30.0, east: 0.5, radius: 0.5, z: [-13.4, 12.0]}

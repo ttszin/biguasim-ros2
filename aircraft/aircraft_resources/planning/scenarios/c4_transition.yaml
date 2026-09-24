@@ -1,0 +1,12 @@
+# C4 (transition): approach and choice of the water entry point. Stresses the transition zone and vertical crossing.
+name: C4
+phase: transicao
+description: Approach and water-entry point choice (transition zone, vertical crossing)
+bounds: {north: [-5.0, 50.0], east: [-25.0, 30.0], up: [-14.0, 15.0]}
+waypoints:
+  - {name: aproximacao, pos: [0.0, 0.0, 10.0]}
+  - {name: alvo_agua,   pos: [38.0, 10.0, -8.0]}
+underwater_reference_m: 30.0
+known:
+  - {type: box, north: [12.0, 22.0], east: [-6.0, 12.0], up: [-1.5, 3.0]}    # boat hull on the surface: entry must be beside it
+  - {type: cylinder, north: 26.0, east: -4.0, radius: 0.6, z: [-12.0, 0.0]}  # buoy chain

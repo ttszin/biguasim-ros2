@@ -1,0 +1,24 @@
+# Planned route with RRT* and a goal change in flight (K5).
+# The goal is changed by publishing on /planner/new_goal WHILE the route is being followed, e.g. from another terminal:
+#   ros2 topic pub --once /planner/new_goal geometry_msgs/msg/Point "{x: 36.0, y: -8.0, z: 6.0}"
+# (x = north, y = east, z = up, metres from home). CL-RRT keeps its tree and reconnects it to the new goal.
+steps:
+  - action: plan_route
+    params:
+      scenario: /aas/aircraft_resources/planning/stage_b/scenarios/b3_field.yaml
+      planner: rrt_star
+      condition: K5
+      seed: 0
+      result_file: /tmp/route_result.json
+
+  - action: takeoff
+    params:
+      takeoff_altitude: 5.0
+
+  - action: follow_route
+    params:
+      timeout: 300.0
+
+  - action: wait
+    params:
+      duration: 3.0

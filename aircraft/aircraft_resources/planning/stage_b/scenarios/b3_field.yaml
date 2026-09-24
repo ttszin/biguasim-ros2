@@ -1,0 +1,23 @@
+# Stage B/C (SITL), aerial only. Frame: (north, east, up) metres RELATIVE TO HOME (spawn at BiguaSim x=8, y=0, z=13.4).
+# A field of staggered poles (r = 0.5 m) from the water (z = 0) up to 12 m above home. Two poles are not on the a-priori map.
+# K5: the final goal moves 8 m to the west of the original one after 6 s (a new waypoint decided during the flight).
+name: B3
+phase: sitl
+description: Staggered pole field; two poles are unmapped; the goal can move (K5)
+bounds: {north: [-2.0, 42.0], east: [-10.0, 10.0], up: [4.0, 9.0]}
+waypoints:
+  - {name: inicio, pos: [0.0, 0.0, 5.0]}
+  - {name: alvo,   pos: [36.0, 0.0, 5.0]}
+known:
+  - {type: cylinder, north: 10.0, east: -3.0, radius: 0.5, z: [-13.4, 12.0]}
+  - {type: cylinder, north: 10.0, east:  3.0, radius: 0.5, z: [-13.4, 12.0]}
+  - {type: cylinder, north: 18.0, east:  0.0, radius: 0.5, z: [-13.4, 12.0]}
+  - {type: cylinder, north: 18.0, east: -6.0, radius: 0.5, z: [-13.4, 12.0]}
+  - {type: cylinder, north: 18.0, east:  6.0, radius: 0.5, z: [-13.4, 12.0]}
+  - {type: cylinder, north: 26.0, east: -3.5, radius: 0.5, z: [-13.4, 12.0]}
+hidden:
+  - {type: cylinder, north: 26.0, east: 3.0, radius: 0.5, z: [-13.4, 12.0]}
+  - {type: cylinder, north: 32.0, east: 0.5, radius: 0.5, z: [-13.4, 12.0]}
+mission_change:
+  t: 6.0
+  goal: [36.0, -8.0, 6.0]

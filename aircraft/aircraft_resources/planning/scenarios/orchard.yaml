@@ -1,0 +1,220 @@
+# Frame: (north, east, up) metres relative to home, same as go_to_known_gps_waypoint.
+name: orchard
+bounds:
+  north: [-2.0, 44.0]
+  east: [-20.0, 20.0]
+  up: [0.5, 8.0]
+safety_margin: 0.8
+start: [0.0, 0.0, 3.0]
+goal: [42.0, 0.0, 3.0]
+obstacles:
+- type: cylinder
+  north: 6.0
+  east: -15.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 6.0
+  east: -10.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 6.0
+  east: -5.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 6.0
+  east: 0.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 6.0
+  east: 5.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 6.0
+  east: 10.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 6.0
+  east: 15.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 12.0
+  east: -12.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 12.0
+  east: -7.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 12.0
+  east: -2.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 12.0
+  east: 2.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 12.0
+  east: 7.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 12.0
+  east: 12.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 12.0
+  east: 17.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 18.0
+  east: -15.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 18.0
+  east: -10.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 18.0
+  east: -5.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 18.0
+  east: 0.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 18.0
+  east: 5.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 18.0
+  east: 10.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 18.0
+  east: 15.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 24.0
+  east: -12.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 24.0
+  east: -7.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 24.0
+  east: -2.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 24.0
+  east: 2.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 24.0
+  east: 7.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 24.0
+  east: 12.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 24.0
+  east: 17.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 30.0
+  east: -15.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 30.0
+  east: -10.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 30.0
+  east: -5.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 30.0
+  east: 0.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 30.0
+  east: 5.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 30.0
+  east: 10.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 30.0
+  east: 15.0
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 36.0
+  east: -12.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 36.0
+  east: -7.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 36.0
+  east: -2.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 36.0
+  east: 2.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 36.0
+  east: 7.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 36.0
+  east: 12.5
+  radius: 0.5
+  z: [0.0, 6.0]
+- type: cylinder
+  north: 36.0
+  east: 17.5
+  radius: 0.5
+  z: [0.0, 6.0]

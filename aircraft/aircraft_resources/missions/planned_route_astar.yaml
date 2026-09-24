@@ -1,0 +1,24 @@
+# Planned route with A*: plan_route -> takeoff -> follow_route (see aircraft_ws/src/mission/README.md).
+# Frame: metres relative to home. The scenario file defines the obstacles, the bounds and the start/goal waypoints
+# (its first waypoint is directly above home; takeoff_altitude must match its altitude).
+# For a real run the SITL must be fed the same obstacles as props (planning/stage_c/run_stage_c.py does that).
+steps:
+  - action: plan_route
+    params:
+      scenario: /aas/aircraft_resources/planning/stage_b/scenarios/b1_poles.yaml
+      planner: astar
+      condition: K2                 # the second pole is not on the a-priori map: it is found in flight and the route is replanned
+      resolution: 1.0
+      result_file: /tmp/route_result.json
+
+  - action: takeoff
+    params:
+      takeoff_altitude: 5.0
+
+  - action: follow_route
+    params:
+      timeout: 300.0
+
+  - action: wait
+    params:
+      duration: 3.0

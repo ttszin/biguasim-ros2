@@ -1,0 +1,14 @@
+# Stage B (SITL), aerial only: a wall with a 5 m gap the route has to go through (stresses waypoint spacing and
+# stop-and-go in GUIDED), plus an unmapped pole after the gate.
+name: B2
+phase: sitl
+description: Wall with a gap, then an unmapped pole
+bounds: {north: [-2.0, 42.0], east: [-12.0, 12.0], up: [4.0, 9.0]}
+waypoints:
+  - {name: inicio, pos: [0.0, 0.0, 5.0]}
+  - {name: alvo,   pos: [34.0, 0.0, 5.0]}
+known:
+  - {type: box, north: [19.0, 21.0], east: [-12.0, 2.0], up: [-13.4, 12.0]}
+  - {type: box, north: [19.0, 21.0], east: [7.0, 12.0],  up: [-13.4, 12.0]}
+hidden:
+  - {type: cylinder, north: 28.0, east: 4.0, radius: 0.5, z: [-13.4, 12.0]}

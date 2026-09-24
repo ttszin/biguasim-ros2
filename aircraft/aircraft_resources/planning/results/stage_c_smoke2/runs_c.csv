@@ -1,0 +1,3 @@
+run_id,scenario,condition,planner,resolution,seed,status,detail,t_initial_ms,n_waypoints,planned_wh,exec_wh_thrust,delta_e_thrust_wh,exec_wh_kinematic,delta_e_kin_wh,planned_length_m,flown_length_m,mission_time_s,n_replans,replan_ms_mean,replan_ms_max,stops_at_waypoints,min_clearance_m,collided,max_crosstrack_m,mean_speed_mps,max_speed_mps,final_error_m
+b3_field_astar_K5_s0,B3,K5,astar,1.0,0,COLISAO,,47.14706399681745,6,0.8737056517129007,1.1811,-0.3074,1.1368,-0.2631,37.314768283340804,40.32,18.8,1,18.7,18.7,0,0.41,1,1.69,2.14,4.85,8.15
+b3_field_astar_K6_s0,B3,K6,astar,1.0,0,ENERGIA_INSUFICIENTE,"plan needs 0.87 Wh, available 10.44 Wh - reserve 10.0 Wh",52.744095995876705,6,0.8737056517129007,,,,,37.314768283340804,,,,,,,,,,,,

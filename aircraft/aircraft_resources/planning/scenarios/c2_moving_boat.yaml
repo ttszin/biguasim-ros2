@@ -1,0 +1,22 @@
+# C2 (F1, air): same kind of trip, low over the water, with a moving obstacle on the surface (WhiteBoat).
+# The boat's mast reaches the whole flyable height, so the route must go around it. Stresses replanning time.
+name: C2
+phase: F1
+description: Long transit at low altitude with a moving surface obstacle (WhiteBoat); replanning time
+bounds: {north: [-10.0, 190.0], east: [-100.0, 100.0], up: [3.0, 12.0]}
+waypoints:
+  - {name: origem, pos: [0.0, 0.0, 6.0]}
+  - {name: roi,    pos: [170.0, 60.0, 6.0]}
+known:
+  - {type: cylinder, north: 60.0, east: 20.0, radius: 1.5, z: [0.0, 40.0]}
+moving:
+  # hull + mast crossing the route from east to west; sweeps across the direct route (~north 95, east ~34) just as the vehicle arrives (~t = 30 s)
+  - name: WhiteBoat
+    size: [6.0, 3.0, 14.0]
+    track:
+      - [0.0,  [95.0, 110.0, 5.0]]
+      - [45.0, [95.0,  -2.5, 5.0]]
+mission_change:          # K5: T11 decides a new ROI mid-flight
+  t: 15.0
+  index: 1
+  goal: [150.0, 90.0, 6.0]

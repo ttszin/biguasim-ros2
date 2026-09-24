@@ -1,0 +1,19 @@
+# Frame: (north, east, up) metres relative to home, same as go_to_known_gps_waypoint.
+# start is directly above home (north=0, east=0): the drone spawns there.
+name: narrow_gap
+bounds:
+  north: [-2.0, 30.0]
+  east: [-5.0, 25.0]
+  up: [0.5, 8.0]
+safety_margin: 0.6
+start: [0.0, 0.0, 3.0]
+goal: [26.0, 20.0, 3.0]
+obstacles:
+- type: box
+  north: [12.0, 14.0]
+  east: [-5.0, 16.0]
+  up: [0.0, 8.0]
+- type: box
+  north: [12.0, 14.0]
+  east: [19.5, 25.0]
+  up: [0.0, 8.0]

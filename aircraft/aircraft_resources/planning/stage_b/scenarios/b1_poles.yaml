@@ -1,0 +1,18 @@
+# Stage B (SITL), aerial only. Frame: (north, east, up) metres RELATIVE TO HOME (spawn at BiguaSim x=8, y=0, z=13.4),
+# NOT the water-surface frame of the Stage A scenarios: ArduPilot GUIDED works in altitude above home.
+# Altitudes are kept in [4, 9] m above home: ardupilot_interface.cpp treats set_reposition altitudes < 0 or > 10 as
+# special GPS-free manoeuvres for this vehicle, and the corridor x = 8..48 at y ~ 0 is the region already flown in T2.
+# FLOOR AT 4 m: in the first run (results/stage_b_run1_low_floor) two RRT* flights descended to ~3.5 m above home and were held
+# ~70 s by real Bridge geometry (deck furniture near the spawn, not in the planners' map). Keep the corridor above it.
+# Poles are BiguaSim props standing from the water surface (z = 0, i.e. -13.4 m relative to home) up to 12 m above home.
+name: B1
+phase: sitl
+description: Two poles on the direct line (one known, one unmapped)
+bounds: {north: [-2.0, 42.0], east: [-12.0, 12.0], up: [4.0, 9.0]}
+waypoints:
+  - {name: inicio, pos: [0.0, 0.0, 5.0]}
+  - {name: alvo,   pos: [34.0, 6.0, 5.0]}
+known:
+  - {type: cylinder, north: 16.0, east: 2.0, radius: 0.6, z: [-13.4, 12.0]}
+hidden:
+  - {type: cylinder, north: 26.0, east: 4.6, radius: 0.5, z: [-13.4, 12.0]}

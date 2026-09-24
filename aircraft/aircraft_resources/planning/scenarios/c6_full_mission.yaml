@@ -1,0 +1,22 @@
+# C6 (full mission): origin -> ROI -> water -> return. Stresses total energy feasibility, including the return.
+name: C6
+phase: completa
+description: Origin -> ROI -> underwater position -> return (total energy feasibility)
+bounds: {north: [-10.0, 100.0], east: [-30.0, 60.0], up: [-14.0, 25.0]}
+waypoints:
+  - {name: origem,       pos: [0.0, 0.0, 15.0]}
+  - {name: roi,          pos: [70.0, 25.0, 12.0]}
+  - {name: sub_agua,     pos: [85.0, 30.0, -7.0]}
+  - {name: retorno,      pos: [0.0, 0.0, 15.0]}
+underwater_reference_m: 40.0
+known:
+  - {type: cylinder, north: 35.0, east: 10.0, radius: 1.5, z: [0.0, 40.0]}
+  - {type: box, north: [58.0, 66.0], east: [12.0, 30.0], up: [-1.5, 6.0]}     # boat on the surface
+  - {type: cylinder, north: 78.0, east: 28.0, radius: 0.5, z: [-14.0, 0.0]}   # buoy chain
+hidden:
+  - {type: cylinder, north: 20.0, east: 6.0, radius: 1.0, z: [0.0, 40.0]}
+  - {type: cylinder, north: 78.0, east: 27.0, radius: 0.5, z: [-14.0, -0.5]}
+mission_change:
+  t: 30.0
+  index: 2
+  goal: [82.0, 20.0, -9.0]      # new underwater waypoint decided by T11 (K5)

@@ -1,0 +1,2 @@
+run_id,scenario,condition,planner,resolution,seed,status,detail,t_initial_ms,n_waypoints,planned_wh,exec_wh_thrust,delta_e_thrust_wh,exec_wh_kinematic,delta_e_kin_wh,planned_length_m,flown_length_m,mission_time_s,n_replans,replan_ms_mean,replan_ms_max,stops_at_waypoints,min_clearance_m,collided,max_crosstrack_m,mean_speed_mps,max_speed_mps,final_error_m
+b1_poles_astar_K1_s0,B1,K1,astar,1.0,0,SUCESSO,,44.93167600230663,3,0.8197897596637347,0.9972,-0.1774,0.9349,-0.1151,35.01209458973748,36.81,15.8,0,,,0,1.57,0,0.99,2.33,5.07,0.44

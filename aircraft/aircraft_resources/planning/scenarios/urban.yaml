@@ -1,0 +1,28 @@
+# Frame: (north, east, up) metres relative to home, same as go_to_known_gps_waypoint.
+# start is directly above home (north=0, east=0): the drone spawns there.
+name: urban
+bounds:
+  north: [-2.0, 50.0]
+  east: [-7.0, 43.0]
+  up: [0.5, 12.0]
+safety_margin: 1.0
+start: [0.0, 0.0, 4.0]
+goal: [48.0, 36.0, 4.0]
+obstacles:
+- type: box
+  north: [8.0, 16.0]
+  east: [-7.0, 22.0]
+  up: [0.0, 12.0]
+- type: box
+  north: [20.0, 28.0]
+  east: [14.0, 43.0]
+  up: [0.0, 12.0]
+- type: box
+  north: [32.0, 40.0]
+  east: [-7.0, 26.0]
+  up: [0.0, 12.0]
+- type: cylinder
+  north: 44.0
+  east: 30.0
+  radius: 1.5
+  z: [0.0, 12.0]

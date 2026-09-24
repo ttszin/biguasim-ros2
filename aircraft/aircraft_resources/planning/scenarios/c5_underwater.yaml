@@ -1,0 +1,14 @@
+# C5 (F3, water): underwater route near the buoy, enlarged margin and position uncertainty.
+name: C5
+phase: F3
+description: Underwater route near the buoy (close obstacles, position uncertainty)
+bounds: {north: [-5.0, 48.0], east: [-30.0, 45.0], up: [-14.0, -0.8]}
+waypoints:
+  - {name: entrada, pos: [0.0, 0.0, -3.0]}
+  - {name: alvo,    pos: [38.0, 14.0, -6.0]}
+underwater_reference_m: 42.0
+known:
+  - {type: cylinder, north: 14.0, east: 1.0, radius: 0.5, z: [-14.0, 0.0]}   # buoy chain
+  - {type: box, north: [20.0, 24.0], east: [-3.0, 9.0], up: [-14.0, -4.0]}   # rock/structure with a gap above and to the sides
+hidden:
+  - {type: cylinder, north: 8.0, east: 2.9, radius: 0.5, z: [-14.0, -1.0]}   # on the direct line, unmapped
