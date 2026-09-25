@@ -231,3 +231,9 @@ Um plano híbrido único (ar, cruzamento vertical, água), dividido por meio e e
 cruzamento, e BlueROV2 (ArduSub) criado na mesma coluna, a 2 m de profundidade, até o alvo submerso. **A transição em si não é simulada** (modelada pelo planejador): nenhum veículo do
 BiguaSim voa e mergulha em SITL. Detalhes, achados (estrutura da ponte fora do mapa, artefato de descida diagonal do modelo de energia) e resultados em `stage_e/NOTES.md`;
 `python3 stage_e/run_stage_e.py --out results/stage_e`.
+
+## Estudo do orçamento de tempo do RRT\*
+
+`python3 rrt_budget_study.py --seeds 20 --jobs 12 --out results/rrt_budget`: energia planejada do RRT\* contra a do A\* com orçamentos de 1 a 40 s por trecho (C1, C4, C5, C6,
+K1, sem limite de iterações). Resultado: a diferença de energia de +7 a +25 % com 1 s some com 20 a 40 s por trecho (C4 −2,0 %, C6 −3,0 %, C5 +0,7 % com 40 s); ver
+`results/RELATORIO_escolha_algoritmo.md`, seção 3.7.

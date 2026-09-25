@@ -13,11 +13,11 @@ Motivos, todos medidos:
 3. **Replanejamento em SITL 3 a 6 vezes mais rápido** (Etapas B, C e D) e pior caso de 1,8 % do orçamento de tempo real contra 12,3 % do A\* na campanha.
 4. **Mesma taxa de sucesso, mesmo comprimento de caminho, mesmo número de waypoints.**
 
-O que pesa contra, também medido:
+O que pesa contra, também medido (a energia é discutida junto com o efeito do orçamento na seção 3.7):
 
-* **Energia planejada maior**: em média +4,6 % (mediana +2,6 %, máximo +22,7 %) sobre o A\* na grade mais fina. Igual em C1 a C3 (ar); **+8,9 % em C4 e +10,9 % em C6** (missões com a transição) e +3,1 % em C5 (subaquático). Os planos do A\* foram mais baratos justamente onde há água, o que confirma o alerta do guia de que a hipótese "RRT\* ganha" pode cair na fase subaquática.
+* **Energia planejada maior com o orçamento padrão de 5 s por trecho**: em média +4,6 % (mediana +2,6 %, máximo +22,7 %) sobre o A\* na grade mais fina. Igual em C1 a C3 (ar); **+8,9 % em C4 e +10,9 % em C6** (missões com a transição) e +3,1 % em C5 (subaquático). Os planos do A\* foram mais baratos justamente onde há água, o que confirma o alerta do guia. **Mas essa diferença é do orçamento, não do algoritmo** (seção 3.7): com 20 a 40 s por trecho o RRT\* empata ou fica abaixo do A\*.
 * **Não determinístico**: 30 seeds por caso, e no SITL aéreo um dos 8 voos do RRT\* ficou a 0,44 m de um obstáculo (raio do veículo 0,5 m; sem evidência de contato).
-* O RRT\* usa o **orçamento fixo por trecho** (5 s) inteiro para refinar; a energia melhora com o tempo e eu **não** medi quanto (hipótese, não resultado).
+* Para fechar a diferença de energia o RRT\* precisa de **mais tempo de planejamento inicial** (20 a 40 s por trecho, medido no desktop; numa placa mais lenta, proporcionalmente mais). Isso é tempo antes do voo, não latência de replanejamento, mas precisa caber na operação.
 
 ## 2. O que foi testado
 
@@ -72,10 +72,24 @@ Comprimento voado igual (mediana −0,1 %). Energia planejada: veja a seção 1.
 * Água (Etapa D): 10/10 SUCESSO, sem colisão.
 * Missão híbrida (Etapa E): os dois concluíram os dois trechos sem colisão; o A\* e o RRT\* escolheram colunas de cruzamento em lados opostos da barcaça (leste −6,9 e +7,1), com energia executada total (com a transição modelada) de 1,71 e 1,40 Wh contra 1,25 e 1,27 planejados.
 
+### 3.7 O efeito do orçamento de tempo do RRT\* na energia (`rrt_budget_study.py`)
+
+Mapa conhecido (K1), 20 seeds por ponto, iteração sem limite (com o limite de 8000 iterações do config o RRT\* pararia antes de usar um orçamento longo; a 5 s o limite não pesava: os resultados são compatíveis com os da campanha, por exemplo C4 +4,6 % e C6 +11,4 % contra +4,6 % e +11,6 % lá). Energia planejada do RRT\* em relação ao A\* na grade mais fina (mediana):
+
+| Cenário | 1 s | 2 s | 5 s | 10 s | 20 s | 40 s |
+|---|---|---|---|---|---|---|
+| C4 | +25.4 % | +20.8 % | +4.6 % | +2.3 % | -0.5 % | -2.0 % |
+| C5 | +7.2 % | +5.0 % | +2.1 % | +1.2 % | +0.8 % | +0.7 % |
+| C6 | +11.4 % | +11.4 % | +11.4 % | +9.5 % | +5.9 % | -3.0 % |
+
+C1 (ar aberto) fica em ±0,01 % em todos os orçamentos. Nos demais, a diferença cai de +25 % (C4), +7 % (C5) e +11 % (C6) com 1 s para **−2,0 %, +0,7 % e −3,0 % com 40 s**: com tempo suficiente o RRT\* alcança e passa o A\*, que só enxerga soluções sobre a sua grade. Gráfico: `rrt_budget/rrt_budget.png`; números em `rrt_budget/summary.csv`.
+
+Ressalvas: só K1, energia planejada (não executada), desktop de 1 núcleo; o A\* de referência é o da grade mais fina da campanha; em C6 o ganho só aparece a partir de 10 s por trecho (3 trechos, então 30 a 120 s de planejamento pré-voo). Isso não reduz o tempo de replanejamento em voo, que continua sendo o do orçamento configurado para os replanejamentos.
+
 ## 4. Onde a hipótese do guia se sustenta
 
 * Sustenta-se para memória, latência e escala: o RRT\* é mais barato e mais rápido.
-* **Não se sustenta sem ressalva para a energia nas missões híbridas**: o A\* achou planos 9 a 11 % mais baratos em C4 e C6.
+* **Energia nas missões híbridas**: com o orçamento padrão o A\* achou planos 9 a 11 % mais baratos em C4 e C6, mas com 20 a 40 s por trecho o RRT\* empata ou fica abaixo (seção 3.7). Ou seja, a hipótese se sustenta se o planejamento inicial puder usar esse tempo antes do voo.
 * Água: a literatura favorece o A\* em cenários complexos e com incerteza. Na incerteza máxima (K4 20 %) o A\* teve 1 TIMEOUT (C4) e o RRT\* 2 (C6); no cenário subaquático puro (C5) nenhum dos dois falhou. A robustez ficou praticamente empatada e a diferença ficou na energia.
 
 ## 5. Limitações
@@ -92,11 +106,11 @@ Comprimento voado igual (mediana −0,1 %). Energia planejada: veja a seção 1.
 
 1. Medir na Raspberry Pi e na Jetson Nano com o YOLO ligado, e reportar o tempo como percentual do orçamento (pendente: modelo da placa e memória livre).
 2. Trocar os coeficientes placeholder pelos reais e refazer a comparação de energia (é o único critério em que o A\* ganha).
-3. Testar o RRT\* com mais tempo de orçamento para ver se a diferença de energia some (hipótese aberta).
+3. Repetir o estudo de orçamento (seção 3.7) em K2/K3, com energia executada no SITL e na placa (para saber quanto do orçamento de 20 a 40 s cabe lá), e decidir o orçamento do planejamento inicial.
 4. Repetir os cenários em escala real (200×200×30 m) para verificar a memória do A\*.
 5. Definir com o T11 a política de TIMEOUT repetido e confirmar com a equipe as pendências do guia (matriz de ocupação, RSM dentro da 8.2, sensores).
 6. Depois da escolha: implementação final com o algoritmo escolhido; o outro fica como ferramenta de teste.
 
 ## 7. Como reproduzir
 
-`python3 benchmark.py` (Etapa A); `stage_b/run_stage_b.py`, `stage_c/run_stage_c.py`, `stage_d/run_stage_d.py`, `stage_e/run_stage_e.py` (SITL); `make_comparison_plots.py` (gráficos); `record_videos.py` (vídeos). Detalhes no `README.md` da pasta `planning/`.
+`python3 benchmark.py` (Etapa A); `stage_b/run_stage_b.py`, `stage_c/run_stage_c.py`, `stage_d/run_stage_d.py`, `stage_e/run_stage_e.py` (SITL); `make_comparison_plots.py` (gráficos); `rrt_budget_study.py` (seção 3.7); `record_videos.py` (vídeos). Detalhes no `README.md` da pasta `planning/`.
