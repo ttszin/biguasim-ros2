@@ -224,3 +224,10 @@ Modelo da placa e memória livre com YOLO · matriz de ocupação vs. esparsa ·
   rótulo ficou grande demais. Câmeras em `recorder.CAMERAS` (`--cam-preset`): `air` e `water` seguem o veículo; `air_high` é oblíqua e alta, para
   cenários com paredes/blocos altos (a câmera de perseguição entra dentro do bloco quando a rota contorna). Cenários gravados: postes (b1/d1), parede com
   abertura (b2/d2) e blocos em S (b4/d3, o d3 é só do ROV).
+
+## Etapa E: missão híbrida ar → água em SITL
+
+Um plano híbrido único (ar, cruzamento vertical, água), dividido por meio e executado por **dois veículos em sequência**: Hydrone (ArduCopter) até 2 m acima da água na coluna de
+cruzamento, e BlueROV2 (ArduSub) criado na mesma coluna, a 2 m de profundidade, até o alvo submerso. **A transição em si não é simulada** (modelada pelo planejador): nenhum veículo do
+BiguaSim voa e mergulha em SITL. Detalhes, achados (estrutura da ponte fora do mapa, artefato de descida diagonal do modelo de energia) e resultados em `stage_e/NOTES.md`;
+`python3 stage_e/run_stage_e.py --out results/stage_e`.

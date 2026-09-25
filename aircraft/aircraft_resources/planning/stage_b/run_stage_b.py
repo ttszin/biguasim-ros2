@@ -108,7 +108,8 @@ def wait_log(path: Path, needle: str, timeout: float, proc: subprocess.Popen | N
 # --------------------------------------------------------------------------- one flight
 
 def run_flight(run_id: str, scenario: str, planner: str, cond: str, seed: int, res: float, out: Path,
-               boot_timeout: float, flight_timeout: float, viewport: bool, runner_extra: list[str] | None = None) -> dict | None:
+               boot_timeout: float, flight_timeout: float, viewport: bool, runner_extra: list[str] | None = None,
+               exec_extra: list[str] | None = None) -> dict | None:
     d = out / "runs" / run_id
     d.mkdir(parents=True, exist_ok=True)
     scen_path = SCENARIO_DIR / f"{scenario}.yaml"
@@ -126,7 +127,7 @@ def run_flight(run_id: str, scenario: str, planner: str, cond: str, seed: int, r
             print(f"  [{run_id}] BiguaSim did not come up (see {d / 'runner.log'})", flush=True)
             return None
         ecmd = [PY, str(STAGE_B / "sitl_exec.py"), "--scenario", str(scen_path), "--planner", planner, "--condition", cond,
-                "--seed", str(seed), "--resolution", str(res), "--out", str(d / "exec.json")]
+                "--seed", str(seed), "--resolution", str(res), "--out", str(d / "exec.json")] + (exec_extra or [])
         ex = start(ecmd, d / "exec.log")
         t0 = time.time()
         while ex.poll() is None and time.time() - t0 < flight_timeout:
@@ -186,6 +187,7 @@ def analyse(run_dir: Path, ex: dict, cfg, energy: EnergyModel, sc) -> dict:
     xt = np.nan
     if hist:
         paths = [np.array(h["path"]) for h in hist]
+        paths += [np.array(pth) for pth in ex.get("planned_paths", [])]      # multi-leg missions (Stage E): every leg's first plan
         d_all = np.full(len(loc), np.inf)
         for path in paths:
             for a, b in zip(path[:-1], path[1:]):

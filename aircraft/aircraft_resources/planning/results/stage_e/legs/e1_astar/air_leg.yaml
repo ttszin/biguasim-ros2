@@ -1,0 +1,74 @@
+name: E1_AIR
+phase: sitl
+description: 'Stage E air leg: origin to the crossing column, 2 m above the water'
+bounds:
+  north:
+  - -19.0
+  - 25.0
+  east:
+  - -12.0
+  - 12.0
+  up:
+  - 1.0
+  - 22.4
+waypoints:
+- name: plano_0
+  pos:
+  - -17.0
+  - 0.0
+  - 18.4
+- name: plano_1
+  pos:
+  - 1.3184808436607263
+  - -0.8651066431180645
+  - 18.020486761968098
+- name: plano_2
+  pos:
+  - 10.318480843660726
+  - -6.8651066431180645
+  - 3.0204867619680975
+- name: plano_3
+  pos:
+  - 12.318480843660726
+  - -6.8651066431180645
+  - 2.0
+known:
+- type: box
+  north:
+  - 6.0
+  - 18.0
+  east:
+  - -5.0
+  - 5.0
+  up:
+  - -1.2
+  - 1.5
+- type: cylinder
+  north: -1.0
+  east: 2.0
+  radius: 0.6
+  z:
+  - 0.0
+  - 25.4
+- type: cylinder
+  north: 3.0
+  east: -2.5
+  radius: 0.5
+  z:
+  - -9.5
+  - 0.5
+hidden:
+- type: cylinder
+  north: -4.0
+  east: -1.5
+  radius: 0.5
+  z:
+  - 0.0
+  - 25.4
+- type: cylinder
+  north: 9.0
+  east: 0.8
+  radius: 0.5
+  z:
+  - -9.5
+  - -1.6

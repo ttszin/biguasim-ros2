@@ -1,0 +1,23 @@
+# Stage E (hybrid air -> water mission, SITL). Frame: (north, east, up) metres, z = 0 at the water surface, origin at BiguaSim (25, 0, 0)
+# (north = x - 25, east = -y). The Hydrone starts on the deck at BiguaSim (8, 0, 13.4) = (-17, 0, 13.4) and takes off to 18.4; the ROV
+# target is at 4 m depth UNDER a barge lying on the surface, so the vertical crossing has to happen beside it and the ROV swims in.
+name: E1
+phase: completa
+description: Hydrone flies to the water, a barge blocks the direct descent over the target; the ROV goes under it (hidden pole in each medium)
+bounds: {north: [-19.0, 24.0], east: [-9.0, 9.0], up: [-7.0, 22.4]}
+waypoints:
+  - {name: origem,   pos: [-17.0, 0.0, 18.4]}
+  - {name: sub_agua, pos: [14.0, 0.0, -4.0]}
+known:
+  - {type: box, north: [6.0, 18.0], east: [-5.0, 5.0], up: [-1.2, 1.5]}                 # barge on the surface (draft 1.2 m)
+  - {type: cylinder, north: -1.0, east: 2.0, radius: 0.6, z: [0.0, 25.4]}               # air: known pole (as B1)
+  - {type: cylinder, north: 3.0, east: -2.5, radius: 0.5, z: [-9.5, 0.5]}               # water: known pole before the barge
+hidden:
+  - {type: cylinder, north: -4.0, east: -1.5, radius: 0.5, z: [0.0, 25.4]}              # air: unmapped pole on the way in
+  - {type: cylinder, north: 9.0, east: 0.8, radius: 0.5, z: [-9.5, -1.6]}               # water: unmapped mooring chain under the barge
+# Volume that is NOT in the maps but is real: the first Stage E flight (A*, diagonal descent from the deck toward the water) stopped dead at
+# BiguaSim (15, 0, 12), i.e. bridge structure below the deck level near x = 15, and the T2 tests only ever used the water column at
+# x >= 25 (bed measured at -9.7 m near x = 25). So the whole region north of the column is a planning no-go volume (it is not spawned as a
+# prop and it is not written into the leg scenarios): the route must stay above 16.5 m until it is over the column, then descend vertically.
+nogo:
+  - {type: box, north: [-19.0, -0.3], east: [-9.0, 9.0], up: [-9.5, 16.5]}

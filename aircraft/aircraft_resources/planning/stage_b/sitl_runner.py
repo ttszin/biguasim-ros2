@@ -43,9 +43,10 @@ LOG_EVERY = 5   # steps
 
 
 class StageBRunner(ArduBiguaSimRunner):
-    def __init__(self, profile, scenario, sc, log_path, recorder=None, **kwargs):
+    def __init__(self, profile, scenario, sc, log_path, recorder=None, frame_origin=None, **kwargs):
         super().__init__(profile, scenario, **kwargs)
         self._rec = recorder
+        self._origin = tuple(frame_origin) if frame_origin else HOME_BSIM      # where the scenario's frame origin sits in BiguaSim
         self._sc = sc
         self._log_path = log_path
         self._k_eta = float(DjiMatrice._params["k_eta"])
@@ -55,12 +56,12 @@ class StageBRunner(ArduBiguaSimRunner):
         for group, material in ((self._sc.known, "steel"), (self._sc.hidden, "brick")):
             for o in group:
                 if hasattr(o, "radius"):
-                    c = to_bsim(o.north, o.east, (o.z_min + o.z_max) / 2.0)
+                    c = to_bsim(o.north, o.east, (o.z_min + o.z_max) / 2.0, self._origin)
                     env.spawn_prop("cylinder", location=c, rotation=[0, 0, 0],
                                    scale=[2 * o.radius, 2 * o.radius, o.z_max - o.z_min],
                                    sim_physics=False, material=material, tag="t82_obstacle")
                 else:
-                    c = to_bsim((o.n_min + o.n_max) / 2, (o.e_min + o.e_max) / 2, (o.u_min + o.u_max) / 2)
+                    c = to_bsim((o.n_min + o.n_max) / 2, (o.e_min + o.e_max) / 2, (o.u_min + o.u_max) / 2, self._origin)
                     env.spawn_prop("box", location=c, rotation=[0, 0, 0],
                                    scale=[o.n_max - o.n_min, o.e_max - o.e_min, o.u_max - o.u_min],
                                    sim_physics=False, material=material, tag="t82_obstacle")
@@ -125,6 +126,7 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=9002)
     ap.add_argument("--ticks", type=int, default=250, help="BiguaSim tick rate; ArduPilot needs gyro rate >= 1.8 x SCHED_LOOP_RATE (=216 Hz at 120)")
     ap.add_argument("--viewport", action="store_true")
+    ap.add_argument("--frame-origin-bsim", nargs=3, type=float, help="BiguaSim position of the scenario frame origin (default: the Hydrone's home)")
     ap.add_argument("--record", help="write an mp4 of the flight (chase camera, see recorder.py)")
     ap.add_argument("--label", default="", help="title burnt into the video")
     ap.add_argument("--cam-preset", help="camera preset of recorder.CAMERAS (default: the vehicle kind's)")
@@ -141,7 +143,7 @@ def main() -> None:
     if a.record:
         rec = Recorder(a.record, a.label, a.ticks, "air", tuple(int(v) for v in a.trail_bgr.split(",")), marker_dir=a.marker_dir, cam=CAMERAS[a.cam_preset] if a.cam_preset else None)
         rec.add_sensor(scenario)
-    with StageBRunner(profile, scenario, sc, a.log, recorder=rec, port=a.port, show_viewport=a.viewport) as runner:
+    with StageBRunner(profile, scenario, sc, a.log, recorder=rec, frame_origin=a.frame_origin_bsim, port=a.port, show_viewport=a.viewport) as runner:
         runner.run()
 
 

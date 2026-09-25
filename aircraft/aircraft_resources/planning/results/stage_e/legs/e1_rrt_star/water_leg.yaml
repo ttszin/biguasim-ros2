@@ -1,0 +1,64 @@
+name: E1_WATER
+phase: sitl
+description: 'Stage E water leg: from the crossing column to the underwater target'
+bounds:
+  north:
+  - 9.066621341475162
+  - 24.0
+  east:
+  - -9.0
+  - 9.0
+  up:
+  - -7.0
+  - -1.5
+waypoints:
+- name: coluna_de_entrada
+  pos:
+  - 13.066621341475162
+  - 7.105383200076684
+  - -2.0
+- name: sub_agua
+  pos:
+  - 14.0
+  - 0.0
+  - -4.0
+known:
+- type: box
+  north:
+  - 6.0
+  - 18.0
+  east:
+  - -5.0
+  - 5.0
+  up:
+  - -1.2
+  - 1.5
+- type: cylinder
+  north: -1.0
+  east: 2.0
+  radius: 0.6
+  z:
+  - 0.0
+  - 25.4
+- type: cylinder
+  north: 3.0
+  east: -2.5
+  radius: 0.5
+  z:
+  - -9.5
+  - 0.5
+hidden:
+- type: cylinder
+  north: -4.0
+  east: -1.5
+  radius: 0.5
+  z:
+  - 0.0
+  - 25.4
+- type: cylinder
+  north: 9.0
+  east: 0.8
+  radius: 0.5
+  z:
+  - -9.5
+  - -1.6

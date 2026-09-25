@@ -43,7 +43,7 @@ def add_thrust_column(truth_csv: Path) -> None:
     t.to_csv(truth_csv, index=False)
 
 
-def run_flight(run_id, scenario, planner, cond, seed, res, out: Path, boot_timeout, flight_timeout, viewport, runner_extra=None):
+def run_flight(run_id, scenario, planner, cond, seed, res, out: Path, boot_timeout, flight_timeout, viewport, runner_extra=None, exec_extra=None):
     d = out / "runs" / run_id
     d.mkdir(parents=True, exist_ok=True)
     scen_path = SCEN / f"{scenario}.yaml"
@@ -53,7 +53,7 @@ def run_flight(run_id, scenario, planner, cond, seed, res, out: Path, boot_timeo
         sitl = B.start(["bash", str(STAGE_D / "rov_sitl.sh")], d / "sitl.log", cwd=B.MISSIONS_DIR)
         time.sleep(10.0)
         ecmd = [B.PY, str(STAGE_D / "rov_exec.py"), "--scenario", str(scen_path), "--planner", planner, "--condition", cond,
-                "--seed", str(seed), "--resolution", str(res), "--out", str(d / "exec.json")]
+                "--seed", str(seed), "--resolution", str(res), "--out", str(d / "exec.json")] + (exec_extra or [])
         ex = B.start(ecmd, d / "exec.log")
         time.sleep(3.0)
         rcmd = [B.PY, str(STAGE_D / "rov_runner.py"), "--scenario", str(scen_path), "--log", str(d / "truth.csv"), "--fix-position"]

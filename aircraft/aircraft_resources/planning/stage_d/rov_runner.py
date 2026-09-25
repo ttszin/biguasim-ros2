@@ -84,6 +84,7 @@ def main() -> None:
     ap.add_argument("--cam-preset", help="camera preset of recorder.CAMERAS (default: the vehicle kind's)")
     ap.add_argument("--marker-dir", help="directory where the executive touches 'started' / 'finished' (video clock and trimming)")
     ap.add_argument("--trail-bgr", default="255,130,70", help="colour of the flown trail, B,G,R")
+    ap.add_argument("--spawn", nargs=3, type=float, metavar=("X", "Y", "Z"), help="BiguaSim spawn of the ROV (default: 25 0 -2)")
     ap.add_argument("--legacy-yaw", action="store_true", help="library yaw convention (mt_z negated, gyro r un-negated)")
     ap.add_argument("--fix-position", action="store_true",
                     help="rewrite the JSON 'position' to NED metres: north/east relative to the spawn, down = -z relative to the WATER SURFACE "
@@ -91,6 +92,9 @@ def main() -> None:
     a = ap.parse_args()
 
     sc = load_scenario(a.scenario)
+    global SPAWN
+    if a.spawn:
+        SPAWN = list(a.spawn)                 # the position fix below is relative to it, like the executive's EKF origin
     profile = VEHICLE_REGISTRY["BlueROV2"]
     flip = a.flip_yaw if a.flip_yaw is not None else (1 if a.legacy_yaw else 0)
     profile = replace(profile, flip_gyro_yaw=bool(flip))

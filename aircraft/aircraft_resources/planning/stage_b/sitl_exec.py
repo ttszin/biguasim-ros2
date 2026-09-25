@@ -114,8 +114,11 @@ def bring_up(s: Sitl, altitude: float) -> None:
         time.sleep(0.1)
 
 
+FRAME_OFFSET = np.zeros(3)      # scenario frame = home-relative frame + FRAME_OFFSET (Stage E: the scenario is in the water-surface frame)
+
+
 def local_pos(s: Sitl) -> np.ndarray:
-    return np.array([s.pos[1], s.pos[2], s.pos[3]])
+    return np.array([s.pos[1], s.pos[2], s.pos[3]]) + FRAME_OFFSET
 
 
 def local_vel(s: Sitl) -> np.ndarray:
@@ -131,14 +134,23 @@ def main() -> None:
     ap.add_argument("--resolution", type=float, default=1.0)
     ap.add_argument("--url", default="tcp:127.0.0.1:5760")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--frame-offset", nargs=3, type=float, default=[0.0, 0.0, 0.0], metavar=("N", "E", "U"),
+                    help="scenario frame minus the vehicle's home-relative frame (Stage E: the home in the surface frame)")
+    ap.add_argument("--frame-origin-bsim", nargs=3, type=float, help="BiguaSim position of the scenario frame origin (recorded for the analysis)")
+    ap.add_argument("--no-land", action="store_true", help="stay in GUIDED at the end (Stage E: the route ends above the water)")
     a = ap.parse_args()
 
+    global FRAME_OFFSET
+    FRAME_OFFSET = np.array(a.frame_offset, dtype=float)
     cfg = sitl_config()
     sc = load_scenario(a.scenario)
     change = None
     if a.condition == "K5" and sc.mission_change:
         change = sc.mission_change
     flight = PlannedFlight(sc, cfg, a.planner, a.condition, a.seed, resolution=a.resolution, mission_change=change)
+
+    if a.frame_origin_bsim:
+        flight.rec["home_bsim"] = list(a.frame_origin_bsim)
 
     def save() -> None:
         Path(a.out).write_text(json.dumps(flight.result()))
@@ -151,13 +163,13 @@ def main() -> None:
             return
 
         s = Sitl(a.url)
-        bring_up(s, flight.takeoff_altitude)
+        bring_up(s, flight.takeoff_altitude - FRAME_OFFSET[2])
         print(f"hovering at {np.round(local_pos(s), 2).tolist()}, starting the route", flush=True)
         boot0 = s.pos[0]
 
         def send(cmd) -> None:
             if cmd is not None:
-                s.goto(*(cmd.target if cmd.kind == "goto" else local_pos(s)))
+                s.goto(*((cmd.target if cmd.kind == "goto" else local_pos(s)) - FRAME_OFFSET))
                 print(f"  {cmd.kind} ({cmd.reason}) -> {np.round(cmd.target, 1).tolist()}", flush=True)
 
         (Path(a.out).parent / "started").touch()          # the video recorder's clock starts here
@@ -174,7 +186,8 @@ def main() -> None:
             for _ in range(30):          # hover a moment so the log ends at rest
                 s.pump()
                 time.sleep(0.1)
-            s.m.set_mode("LAND")
+            if not a.no_land:
+                s.m.set_mode("LAND")
     except Exception as e:  # noqa: BLE001  (the orchestrator needs the reason, whatever it is)
         flight.abort(f"{type(e).__name__}: {e}", time.time())
         print("ERROR:", f"{type(e).__name__}: {e}", flush=True)

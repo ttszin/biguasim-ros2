@@ -52,6 +52,8 @@ class Rov(Sitl):
                     raise
                 time.sleep(1.0)
         self.up_offset = 0.0         # surface_up = ekf_up + up_offset
+        self.spawn_ne = (0.0, 0.0)   # surface-frame north/east of the EKF origin (the spawn); 0, 0 for the tests at the frame origin
+        self.spawn_up = SPAWN_UP
         self.extra: dict = {}
         self.params: dict = {}
 
@@ -90,13 +92,13 @@ class Rov(Sitl):
                 self.extra["gpi_alt"], self.extra["gpi_rel"] = msg.alt / 1000.0, msg.relative_alt / 1000.0
 
     def surface_pos(self) -> np.ndarray:
-        return np.array([self.pos[1], self.pos[2], self.pos[3] + self.up_offset])
+        return np.array([self.pos[1] + self.spawn_ne[0], self.pos[2] + self.spawn_ne[1], self.pos[3] + self.up_offset])
 
     def surface_vel(self) -> np.ndarray:
         return np.array([self.pos[4], self.pos[5], self.pos[6]])
 
     def goto_surface(self, north: float, east: float, up: float) -> None:
-        self.goto(north, east, up - self.up_offset)
+        self.goto(north - self.spawn_ne[0], east - self.spawn_ne[1], up - self.up_offset)
 
 
 def bring_up(s: Rov) -> None:
@@ -108,7 +110,7 @@ def bring_up(s: Rov) -> None:
     while time.time() - t0 < 3:                        # let a few samples in, then take the offset from the known spawn depth
         s.pump()
         time.sleep(0.1)
-    s.up_offset = SPAWN_UP - s.pos[3]
+    s.up_offset = s.spawn_up - s.pos[3]
     print(f"EKF up at spawn = {s.pos[3]:.2f} m -> offset to the surface frame {s.up_offset:+.2f} m", flush=True)
     print("guided + arm...", flush=True)
     t0 = time.time()
@@ -181,6 +183,9 @@ def main() -> None:
     ap.add_argument("--url", default="tcp:127.0.0.1:5760")
     ap.add_argument("--out", required=True)
     ap.add_argument("--probe", action="store_true")
+    ap.add_argument("--spawn-n", type=float, default=0.0, help="surface-frame north of the spawn (Stage E hand-off point)")
+    ap.add_argument("--spawn-e", type=float, default=0.0, help="surface-frame east of the spawn")
+    ap.add_argument("--spawn-up", type=float, default=SPAWN_UP, help="surface-frame z of the spawn (depth, negative)")
     a = ap.parse_args()
 
     if a.probe:
@@ -207,6 +212,7 @@ def main() -> None:
         if not ok:
             return
         s = Rov(a.url)
+        s.spawn_ne, s.spawn_up = (a.spawn_n, a.spawn_e), a.spawn_up
         bring_up(s)
         pos0 = s.surface_pos()
         print(f"at {np.round(pos0, 2).tolist()} (surface frame), starting the route", flush=True)
