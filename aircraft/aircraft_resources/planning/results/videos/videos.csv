@@ -8,3 +8,6 @@ water_gate_astar.mp4,D2,K2,astar,SUCESSO,0.256,17.03,1,2
 water_gate_rrt_star.mp4,D2,K2,rrt_star,SUCESSO,0.256,17.03,1,2
 water_blocks_astar.mp4,D3,K2,astar,SUCESSO,0.433,28.8,105,6
 water_blocks_rrt_star.mp4,D3,K2,rrt_star,SUCESSO,0.414,27.55,44,7
+air_gate_astar.mp4,B2,K2,astar,SUCESSO,0.829,35.4,5,4
+air_blocks_astar.mp4,B4,K2,astar,SUCESSO,1.002,42.81,6,6
+air_blocks_rrt_star.mp4,B4,K2,rrt_star,SUCESSO,0.997,42.57,7,7
