@@ -56,6 +56,26 @@ python3 biguasim_replay.py --trace results/campaign/traces/C4_K1_None_rrt_star_N
 python3 benchmark.py --seeds 10 --only C3 --set rrt_star.step=1.0 rrt_star.rewire_radius=4 --out results/rsm_a
 ```
 
+### Sugestão de fatores/faixas para o RSM (T8.3, CCD rotatable de 3 fatores)
+
+O guia lista 4 candidatos pro RRT\*: passo máximo, raio de rewiring, viés para o objetivo e restrição de consumo por segmento
+(`max_segment_wh`); o orçamento de tempo (`time_budget_s`) fica **fora** ("fixado pelo hardware, não otimizado") — fixe-o antes de
+rodar o CCD, porque ele sozinho já muda a energia planejada do RRT\* de +25 % a −3 % contra o A\* conforme o valor (`rrt_budget_study.py`).
+Pontos de partida para um CCD rotatable (α ≈ 1,682 para k=3), centrados nos valores atuais de `config/planner.yaml`:
+
+| Fator | −α | −1 | 0 (centro = default) | +1 | +α |
+|---|---|---|---|---|---|
+| `rrt_star.step` (m) | ~0,66 | 1,0 | 2,0 | 3,0 | ~3,68 |
+| `rrt_star.rewire_radius` (m) | ~1,66 | 3,0 | 5,0 | 7,0 | ~8,68 |
+| `rrt_star.goal_bias` | ~0,0 | 0,04 | 0,08 | 0,12 | ~0,16 |
+| `rrt_star.max_segment_wh` | — | — | — | — | — |
+
+`max_segment_wh` está **desligado** (`null`) hoje, então não tem um centro já tunado: a energia planejada por trecho na campanha da
+Etapa A varia de ~0,45 Wh (C5, um trecho curto na água) a ~3,8 Wh (C1, um trecho longo no ar), com ~1,4 Wh por trecho na missão
+completa (C6, 3 trechos). É uma estimativa grosseira da ordem de grandeza, não uma faixa medida para RSM — ajuste olhando
+`energy_wh_by_leg` nos seus próprios cenários antes de fixar −α/+α. Escolha 3 dos 4 fatores (não dá pra rodar os 4 num CCD de 3
+fatores) e documente por que descartou o quarto.
+
 ## Decisões de projeto que valem conhecer
 
 * **Mapa esparso, não denso.** A parte a priori é analítica; só o que os sensores inserem é guardado como voxels
