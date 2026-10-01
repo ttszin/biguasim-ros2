@@ -178,14 +178,14 @@ Matriz mínima: C1/C5/C6 em todas; C2→K5, C3→K2, C4→K4 (mais K1).
 | Entregável | Estado |
 |---|---|
 | Infraestrutura comum (mapa, custo, colisão, interface) com testes unitários | **Pronto** |
-| RRT\* integrado | **Pronto**: Etapa A, Etapa B (12 voos, pymavlink) e **Etapa C: dentro do `mission_node`** (33 voos em SITL, stack ROS 2 real), só parte aérea. |
+| RRT\* integrado | **Pronto**: Etapa A (ar/água simulados), Etapa B (12 voos no ar, pymavlink), **Etapa C: dentro do `mission_node`** (33 voos em SITL, stack ROS 2 real, só ar), Etapa D (10 voos na água) e Etapa E (missão híbrida ar→água, 2 voos). |
 | A\* baseline | **Pronto** (com D\* Lite p/ replanejamento) |
 | Scripts de cenários e coleta de métricas, seeds fixas | **Pronto** (`benchmark.py`, seeds 0..29) |
 | Planilha de resultados por cenário e condição | **Pronto em CSV** (`runs.csv`, `summary.csv`); não gerei `.xlsx` (sem `openpyxl` instalado) |
-| Relatório com escolha, justificativa e limitações | Rascunho automático em `results/*/report.md`; **a escolha final e o texto são seus** |
+| Relatório com escolha, justificativa e limitações | **Pronto (rascunho para a equipe validar)**: `results/RELATORIO_escolha_algoritmo.md` recomenda RRT\* com dados; a decisão final continua da equipe. |
 | Medição de tempo/memória na placa embarcada | **Não feito.** Só desktop, 1 núcleo/execução, tempos também em % do orçamento; `--cpu-slowdown` é só estimativa. |
 | Implementação final com o algoritmo escolhido | **Não feito** (depende da escolha) |
-| Vídeos das missões | **Não gravei.** `biguasim_replay.py` reproduz cada missão para você gravar a tela. |
+| Vídeos das missões | **Pronto**: 12 voos (ar/água × postes/parede/blocos, `results/videos/`) + a missão híbrida (`results/stage_e/videos/`). Não versionados no git (`.gitignore`); regenere com `record_videos.py` / `stage_e/run_stage_e.py`. |
 
 ### Limitações e placeholders — leia antes de citar números
 
